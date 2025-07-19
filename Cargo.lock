@@ -1448,6 +1448,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -1800,7 +1801,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pixiv-archive"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1821,6 +1822,7 @@ dependencies = [
  "post-archiver-utils",
  "rayon",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_repr",
