@@ -1,7 +1,10 @@
 [package]
 name = "pixiv-archive"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+description = "A Pixiv Download and Archiver"
+authors = ["xiao-e-yun <a0970323059@gmail.com>"]
+repository = "https://github.com/xiao-e-yun/PixivArchive"
 
 [dependencies]
 chrono = "0.4.41"
