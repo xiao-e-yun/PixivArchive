@@ -167,7 +167,7 @@ pub async fn archive_file(
         }
     };
 
-    if let ArchiveRequest::Ugoira { frames, .. } = request {
+    if let ArchiveRequest::Ugoira {  .. } = request {
         todo!("Handle Ugoira frames");
     }
 

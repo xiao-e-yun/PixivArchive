@@ -3,7 +3,6 @@ use crate::{Config, artwork::PixivArtworkId, fetch, user::PixivUserId};
 use log::{debug, error, info, warn};
 use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
 
 #[derive(Debug, Clone, Deserialize)]

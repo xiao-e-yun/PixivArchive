@@ -1,6 +1,5 @@
 use post_archiver::{importer::UnsyncTag, PlatformId};
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

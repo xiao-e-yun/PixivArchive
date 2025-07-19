@@ -4,7 +4,7 @@ use artwork::{PixivArtworkId, resolve_artworks};
 use config::Config;
 use favorite::reslove_current_user;
 use file::{ArchiveRequest, archive_files};
-use log::{debug, info, warn, error};
+use log::{debug, info, warn};
 use post_archiver::manager::PostArchiverManager;
 use post_archiver_utils::{ArchiveClient, Error, Result, display_metadata};
 use reqwest::{
