@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use artwork::{PixivArtworkId, resolve_artworks};
 use config::Config;
+use favorite::reslove_current_user;
 use file::{ArchiveRequest, archive_files};
-use log::{debug, info, warn};
+use log::{debug, info, warn, error};
 use post_archiver::manager::PostArchiverManager;
 use post_archiver_utils::{ArchiveClient, Error, Result, display_metadata};
 use reqwest::{
@@ -24,6 +25,7 @@ pub mod file;
 pub mod series;
 pub mod tag;
 pub mod user;
+pub mod favorite;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -74,9 +76,10 @@ async fn main() {
     let (tx_series, rx_series) = unbounded_channel::<PixivSeriesId>();
     let (tx_files, rx_files) = unbounded_channel::<(PathBuf, ArchiveRequest)>();
 
-    reslove_all(&config, tx_users, tx_series, tx_artworks.clone());
+    reslove_all(&config, tx_users.clone(), tx_series, tx_artworks.clone());
 
     join!(
+        reslove_current_user(&config, &client, tx_artworks.clone(), tx_users),
         reslove_users(&config, client.clone(), rx_users, tx_artworks.clone()),
         reslove_series(&config, &client, rx_series, tx_artworks),
         resolve_artworks(&config, manager, &client, rx_authors, tx_files),
@@ -124,9 +127,6 @@ fn reslove_all(
         info!("[main] Archive series: {series:?}");
         tx_series.send(series).unwrap();
     }
-
-    // TODO: followed_users
-    // TODO: favorite
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +173,6 @@ pub async fn fetch<T: DeserializeOwned>(client: &ArchiveClient, url: &str) -> Re
     debug!("[fetch] Fetching: {url}");
     client
         .fetch::<PixivResponse<T>>(url)
-        .await
+        .await 
         .and_then(|r| r.downcast())
 }
