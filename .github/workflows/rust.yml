@@ -32,11 +32,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Update version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags | grep -oP '^v?\K[0-9]+\.[0-9]+\.[0-9]+')
+          sed -i "s/^version = \".*\"$/version = \"$VERSION\"/" Cargo.toml
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
           # Note that glob pattern is not supported yet.
-          bin: fanbox-archive
+          bin: pixiv-archive
           # (optional) Target triple, default is host triple.
           # This is optional but it is recommended that this always be set to
           # clarify which target you are building for if macOS is included in
