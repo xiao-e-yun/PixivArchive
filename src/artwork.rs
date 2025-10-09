@@ -175,18 +175,25 @@ pub async fn resolve_artworks(
     files_pipeline: Input<FileEvent>,
     sync_pipeline: Input<SyncEvent>,
     client: &ArchiveClient,
+    manager: &Manager,
     config: &Config,
 ) {
     let pb = Progress::new(config.multi.clone(), "artwork");
     let mut tasks = JoinSet::new();
     while let Some(id) = artworks_pipeline.recv().await {
+        pb.inc_length(1);
+        if matches!(manager.lock().await.find_post(&id.url()), Ok(Some(_))) {
+            info!("[artwork] Skipping existing post: {}", id.url());
+            pb.inc(1);
+            continue;
+        }
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         let files_pipeline = files_pipeline.clone();
         let sync_pipeline = sync_pipeline.clone();
         let client = client.clone();
         let pb = pb.clone();
         tasks.spawn(async move {
-            pb.inc_length(1);
             let source = id.url();
 
             let artwork = match fetch::<PixivArtwork>(&client, &id.api_url()).await {
