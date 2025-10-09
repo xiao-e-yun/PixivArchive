@@ -1,27 +1,28 @@
-use std::{collections::HashMap, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, path::PathBuf};
 
 use chrono::{DateTime, Utc};
-use log::{debug, error, info};
+use futures::try_join;
+use log::{error, info, trace};
+use plyne::{Input, Output};
 use post_archiver::{
     Comment,
     importer::{UnsyncCollection, UnsyncContent, UnsyncFileMeta, UnsyncPost},
-    manager::PostArchiverManager,
 };
-use post_archiver_utils::ArchiveClient;
+use post_archiver_utils::{ArchiveClient, Result};
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::json;
 use serde_repr::Deserialize_repr;
+use tempfile::TempPath;
 use tokio::{
-    sync::{
-        Mutex,
-        mpsc::{UnboundedReceiver, UnboundedSender},
-    },
-    task::{LocalSet, spawn_local},
+    fs::{self, File, OpenOptions, create_dir_all},
+    io, join,
+    task::JoinSet,
 };
 
 use crate::{
-    config::{Config, ProgressManager},
+    FileEvent, Manager, SyncEvent,
+    config::{Config, Progress},
     fetch,
     file::{ArchiveRequest, PixivUgoira},
     tag::PixivTags,
@@ -54,6 +55,13 @@ impl PixivArtworkId {
         match self {
             PixivArtworkId::Illust(id) => format!("https://www.pixiv.net/artworks/{id}"),
             PixivArtworkId::Novel(id) => format!("https://www.pixiv.net/novel/show.php?id={id}"),
+        }
+    }
+
+    pub fn api_url(&self) -> String {
+        match self {
+            PixivArtworkId::Illust(id) => format!("https://www.pixiv.net/ajax/illust/{id}"),
+            PixivArtworkId::Novel(id) => format!("https://www.pixiv.net/ajax/novel/{id}"),
         }
     }
 }
@@ -163,163 +171,183 @@ pub struct PixivIllustPageUrls {
 }
 
 pub async fn resolve_artworks(
-    config: &Config,
-    manager: PostArchiverManager,
+    mut artworks_pipeline: Output<PixivArtworkId>,
+    files_pipeline: Input<FileEvent>,
+    sync_pipeline: Input<SyncEvent>,
     client: &ArchiveClient,
-    mut rx: UnboundedReceiver<PixivArtworkId>,
-    tx: UnboundedSender<(PathBuf, ArchiveRequest)>,
+    config: &Config,
 ) {
+    let pb = Progress::new(config.multi.clone(), "artwork");
+    let mut tasks = JoinSet::new();
+    while let Some(id) = artworks_pipeline.recv().await {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let files_pipeline = files_pipeline.clone();
+        let sync_pipeline = sync_pipeline.clone();
+        let client = client.clone();
+        let pb = pb.clone();
+        tasks.spawn(async move {
+            pb.inc_length(1);
+            let source = id.url();
+
+            let artwork = match fetch::<PixivArtwork>(&client, &id.api_url()).await {
+                Ok(artwork) => artwork,
+                Err(e) => {
+                    error!("[artwork] Failed to fetch {source}: {e:?}");
+                    return;
+                }
+            };
+
+            let ((contents, thumb), comments) = join!(
+                common::get_contents_and_thumb(&client, &artwork),
+                common::get_comments(&client, &artwork)
+            );
+
+            let files = contents
+                .iter()
+                .filter_map(|c| match c {
+                    UnsyncContent::File(f) => Some(f),
+                    UnsyncContent::Text(_) => None,
+                })
+                .chain(thumb.iter())
+                .map(|f| f.data.clone())
+                .collect::<Vec<_>>();
+
+            files_pipeline.send((files, tx)).unwrap();
+            sync_pipeline
+                .send(SyncEvent {
+                    source,
+                    artwork,
+                    contents,
+                    thumb,
+                    comments,
+                    files: rx,
+                })
+                .unwrap();
+
+            pb.inc(1);
+        });
+    }
+
+    info!("[artwork] Archive resolved");
+}
+
+pub async fn archive_artworks(mut sync_pipeline: Output<SyncEvent>, manager: &Manager) {
     let platform = manager
+        .lock()
+        .await
         .import_platform("pixiv".to_string())
         .expect("Failed to get platform");
 
-    let user_manager = UserManager::new(platform);
+    let mut user_manager = UserManager::new(platform);
 
-    let local_set = LocalSet::new();
-    let pb = ProgressManager::new(config.multi.clone(), "artwork");
+    'main: while let Some(event) = sync_pipeline.recv().await {
+        let Ok(mut files_map) = event.files.await else {
+            error!("[artwork] Failed to archive files for {}", event.artwork.id);
+            continue;
+        };
 
-    let manager = Rc::new(Mutex::new(manager));
-    local_set
-        .run_until(async move {
-            debug!("[artwork] Waiting for artworks to reslove");
-            while let Some(artwork) = rx.recv().await {
-                let pb = pb.clone();
-                pb.inc_length(1);
+        let Ok(author) = user_manager.import(&manager.lock().await, &event.artwork) else {
+            error!(
+                "[artwork] Failed to archive author for {}",
+                event.artwork.user_id
+            );
+            continue;
+        };
 
-                let manager = manager.clone();
-                let client = client.clone();
-                let tx = tx.clone();
-                let user_manager = user_manager.clone();
-                spawn_local(async move {
-                    let requests = reslove_artwork(manager, client, user_manager, artwork).await;
-
-                    info!("[artwork] Archived {} ({})", artwork.name(), artwork.id());
-                    pb.inc(1);
-
-                    for request in requests {
-                        tx.send(request).unwrap()
-                    }
-                });
-            }
-        })
-        .await;
-
-    local_set.await;
-
-    info!("[artwork] Archive finished");
-}
-
-async fn reslove_artwork(
-    manager: Rc<Mutex<PostArchiverManager>>,
-    client: ArchiveClient,
-    user_manager: UserManager,
-    artwork: PixivArtworkId,
-) -> Vec<(PathBuf, ArchiveRequest)> {
-    let source = artwork.url();
-
-    let artwork = match fetch::<PixivArtwork>(
-        &client,
-        &match artwork {
-            PixivArtworkId::Illust(id) => format!("https://www.pixiv.net/ajax/illust/{id}"),
-            PixivArtworkId::Novel(id) => format!("https://www.pixiv.net/ajax/novel/{id}"),
-        },
-    )
-    .await
-    {
-        Ok(artwork) => artwork,
-        Err(e) => {
-            error!("[artwork] Failed to fetch {source}: {e:?}");
-            return vec![];
-        }
-    };
-
-    let mut contents = common::parse_description(&artwork);
-    let thumb: Option<UnsyncFileMeta<ArchiveRequest>>;
-
-    match &artwork.content {
-        PixivArtworkContent::Illust { illust_type, .. } => {
-            let file_metas = match illust::fetch_pages(&client, &artwork.id).await {
-                Ok(artworks) => artworks,
-                Err(e) => {
-                    error!("[artwork] Failed to fetch pages {}: {:?}", artwork.id, e);
-                    return vec![];
-                }
-            };
-            thumb = file_metas.first().cloned();
-
-            match illust_type {
-                IllustType::Illust | IllustType::Manga => {
-                    contents.extend(file_metas.into_iter().map(UnsyncContent::File));
-                }
-                IllustType::Ugoira => {
-                    let extra = thumb.as_ref().unwrap().extra.clone();
-                    let ugoira = match fetch::<PixivUgoira>(
-                        &client,
-                        &format!(
-                            "https://www.pixiv.net/ajax/illust/{}/ugoira_meta",
-                            &artwork.id
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(ugoira) => ugoira,
-                        Err(e) => {
-                            error!("[artwork] Failed to fetch ugoira {}: {:?}", artwork.id, e);
-                            return vec![];
-                        }
-                    };
-
-                    contents.push(UnsyncContent::File(
-                        UnsyncFileMeta::new(
-                            "ugoira.webm".to_string(),
-                            "video/webm".to_string(),
-                            ArchiveRequest::Ugoira {
-                                url: ugoira.original_src,
-                                frames: ugoira.frames,
-                            },
-                        )
-                        .extra(extra),
-                    ));
-                }
-            }
-        }
-        PixivArtworkContent::Novel {
-            content, cover_url, ..
-        } => {
-            contents.push(UnsyncContent::Text(content.clone()));
-            thumb = Some(novel::parse_cover(cover_url));
-        }
-    };
-
-    let comments = common::get_comments(&client, &artwork).await;
-
-    let tags = artwork.tags.into_tags(user_manager.platform);
-    let collection = common::get_collections(&artwork).await;
-
-    let mut manager = manager.lock().await;
-    let author = user_manager.get(&manager, &artwork).await;
-
-    let tx = manager.transaction().unwrap();
-    let (_post, files) =
-        match UnsyncPost::new(user_manager.platform, source, artwork.title, contents)
-            .thumb(thumb)
-            .updated(common::parse_date(&artwork.upload_date))
-            .published(common::parse_date(&artwork.create_date))
-            .tags(tags)
-            .comments(comments)
-            .authors(author.into_iter().collect())
-            .collections(collection.into_iter().collect())
-            .sync(&tx)
+        let mut manager = manager.lock().await;
+        let manager = manager.transaction().unwrap();
+        let files = match UnsyncPost::new(
+            platform,
+            event.source,
+            event.artwork.title.clone(),
+            event.contents,
+        )
+        .thumb(event.thumb)
+        .authors(vec![author])
+        .comments(event.comments)
+        .published(common::parse_date(&event.artwork.create_date))
+        .updated(common::parse_date(&event.artwork.upload_date))
+        .tags(event.artwork.tags.into_tags(platform))
+        .collections(common::get_collections(&event.artwork))
+        .sync(&manager)
         {
-            Ok(post) => post,
+            Ok((_post, files_map)) => files_map,
             Err(e) => {
-                error!("[artwork] Failed to sync post {}: {:?}", artwork.id, e);
-                return vec![];
+                error!(
+                    "[artwork] Failed to archive post for {}: {:?}",
+                    event.artwork.id, e
+                );
+                continue;
             }
         };
-    tx.commit().unwrap();
 
-    files
+        if let Some(path) = files.first().map(|(dst, _)| dst.parent().unwrap())
+            && let Err(e) = fs::create_dir_all(path).await
+        {
+            error!(
+                "[artwork] Failed to create directory for {}: {}",
+                path.display(),
+                e
+            );
+            continue;
+        }
+
+        let mut create_dir = true;
+        for (path, req) in files {
+            let url = req.url().to_string();
+            if let Err(e) = save_file(&mut files_map, &path, &url, create_dir).await {
+                error!("[artwork] Failed to save file {}: {}", path.display(), e);
+                continue 'main;
+            };
+            create_dir = false;
+        }
+
+        if let Err(e) = manager.commit() {
+            error!(
+                "[artwork] Failed to commit transaction for {}: {e:?}",
+                event.artwork.id
+            );
+            continue;
+        }
+        info!(
+            "[artwork] Archived {} ({})",
+            event.artwork.title, event.artwork.id
+        );
+    }
+
+    async fn save_file(
+        file_map: &mut HashMap<String, TempPath>,
+        path: &PathBuf,
+        url: &str,
+        create_dir: bool,
+    ) -> Result<()> {
+        if create_dir {
+            let path = path.parent().unwrap();
+            create_dir_all(path).await?;
+        }
+
+        let temp = file_map.remove(url).ok_or(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("File not found in map: {url}"),
+        ))?;
+
+        let mut open_options = OpenOptions::new();
+        let (mut src, mut dst) = try_join!(
+            File::open(&temp),
+            open_options
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+        )?;
+
+        io::copy(&mut src, &mut dst).await?;
+        trace!("File saved: {url} -> {}", path.display());
+
+        Ok(())
+    }
+
+    info!("[artwork] Archive finished");
 }
 
 mod common {
@@ -350,12 +378,82 @@ mod common {
         }
     }
 
-    pub async fn get_collections(artwork: &PixivArtwork) -> Option<UnsyncCollection> {
+    pub fn get_collections(artwork: &PixivArtwork) -> Vec<UnsyncCollection> {
         // TODO: add more collections support
         artwork
             .series_nav_data
             .as_ref()
             .map(|nav| nav.into_collection(artwork.user_id.clone()))
+            .into_iter()
+            .collect()
+    }
+
+    pub async fn get_contents_and_thumb(
+        client: &ArchiveClient,
+        artwork: &PixivArtwork,
+    ) -> (
+        Vec<UnsyncContent<ArchiveRequest>>,
+        Option<UnsyncFileMeta<ArchiveRequest>>,
+    ) {
+        let mut contents = common::parse_description(artwork);
+        let thumb: Option<UnsyncFileMeta<ArchiveRequest>>;
+
+        match &artwork.content {
+            PixivArtworkContent::Illust { illust_type, .. } => {
+                let file_metas = match illust::fetch_pages(client, &artwork.id).await {
+                    Ok(artworks) => artworks,
+                    Err(e) => {
+                        error!("[artwork] Failed to fetch pages {}: {:?}", artwork.id, e);
+                        return (vec![], None);
+                    }
+                };
+                thumb = file_metas.first().cloned();
+
+                match illust_type {
+                    IllustType::Illust | IllustType::Manga => {
+                        contents.extend(file_metas.into_iter().map(UnsyncContent::File));
+                    }
+                    IllustType::Ugoira => {
+                        let extra = thumb.as_ref().unwrap().extra.clone();
+                        let ugoira = match fetch::<PixivUgoira>(
+                            client,
+                            &format!(
+                                "https://www.pixiv.net/ajax/illust/{}/ugoira_meta",
+                                &artwork.id
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(ugoira) => ugoira,
+                            Err(e) => {
+                                error!("[artwork] Failed to fetch ugoira {}: {:?}", artwork.id, e);
+                                return (vec![], None);
+                            }
+                        };
+
+                        contents.push(UnsyncContent::File(
+                            UnsyncFileMeta::new(
+                                "ugoira.webm".to_string(),
+                                "video/webm".to_string(),
+                                ArchiveRequest::Ugoira {
+                                    url: ugoira.original_src,
+                                    frames: ugoira.frames,
+                                },
+                            )
+                            .extra(extra),
+                        ));
+                    }
+                }
+            }
+            PixivArtworkContent::Novel {
+                content, cover_url, ..
+            } => {
+                contents.push(UnsyncContent::Text(content.clone()));
+                thumb = Some(novel::parse_cover(cover_url));
+            }
+        };
+
+        (contents, thumb)
     }
 }
 

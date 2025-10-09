@@ -1,31 +1,35 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
 
-use artwork::{PixivArtworkId, resolve_artworks};
+use artwork::{PixivArtwork, PixivArtworkId, archive_artworks, resolve_artworks};
 use config::Config;
 use favorite::reslove_current_user;
-use file::{ArchiveRequest, archive_files};
-use log::{debug, info, warn};
-use post_archiver::manager::PostArchiverManager;
+use file::{ArchiveRequest, download_files};
+use log::{info, warn};
+use plyne::{Input, define_tasks};
+use post_archiver::{
+    Comment,
+    importer::{UnsyncContent, UnsyncFileMeta},
+    manager::PostArchiverManager,
+};
 use post_archiver_utils::{ArchiveClient, Error, Result, display_metadata};
 use reqwest::{
-    header::{HeaderMap, HeaderValue, COOKIE, REFERER}, Client
+    Client,
+    header::{COOKIE, HeaderMap, HeaderValue, REFERER},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use series::{PixivSeriesId, reslove_series};
-use tokio::{
-    join,
-    sync::mpsc::{UnboundedSender, unbounded_channel},
-};
+use tempfile::TempPath;
+use tokio::sync::Mutex;
 use user::{PixivUserId, reslove_users};
 
 pub mod artwork;
 pub mod comment;
 pub mod config;
+pub mod favorite;
 pub mod file;
 pub mod series;
 pub mod tag;
 pub mod user;
-pub mod favorite;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -37,7 +41,10 @@ async fn main() {
     display_metadata(
         "Pixiv Archive",
         &[
-            ("Version", format!("v{}", env!("CARGO_PKG_VERSION")).as_str()),
+            (
+                "Version",
+                format!("v{}", env!("CARGO_PKG_VERSION")).as_str(),
+            ),
             ("Overwrite", yes_or_no(config.overwrite)),
             ("Output", config.output.to_str().unwrap()),
             ("Limit", &config.limit.to_string()),
@@ -59,73 +66,90 @@ async fn main() {
     info!("[main] Connecting to PostArchiver");
     let manager = PostArchiverManager::open_or_create(&config.output).unwrap();
 
-    let client = ArchiveClient::new(
-        Client::builder()
-            .default_headers(HeaderMap::from_iter([
-                (COOKIE, HeaderValue::from_str(&format!("PHPSESSID={}", config.session)).unwrap()),
-                (REFERER, HeaderValue::from_str("https://www.pixiv.net/").unwrap())
-            ]))
-            .user_agent(&config.user_agent)
-            .build()
-            .unwrap(),
-        config.limit,
-    );
+    let client = client(&config);
 
-    let (tx_users, rx_users) = unbounded_channel::<PixivUserId>();
-    let (tx_artworks, rx_authors) = unbounded_channel::<PixivArtworkId>();
-    let (tx_series, rx_series) = unbounded_channel::<PixivSeriesId>();
-    let (tx_files, rx_files) = unbounded_channel::<(PathBuf, ArchiveRequest)>();
-
-    reslove_all(&config, tx_users.clone(), tx_series, tx_artworks.clone());
-
-    join!(
-        reslove_current_user(&config, &client, tx_artworks.clone(), tx_users),
-        reslove_users(&config, client.clone(), rx_users, tx_artworks.clone()),
-        reslove_series(&config, &client, rx_series, tx_artworks),
-        resolve_artworks(&config, manager, &client, rx_authors, tx_files),
-        archive_files(&config, rx_files),
-    );
+    PixivSystem::new(Mutex::new(manager), config, client)
+        .execute()
+        .await;
 
     info!("[main] Archive completed");
 }
 
-fn reslove_all(
+pub type Manager = Mutex<PostArchiverManager>;
+
+pub type FileEvent = (
+    Vec<ArchiveRequest>,
+    tokio::sync::oneshot::Sender<HashMap<String, TempPath>>,
+);
+
+#[derive(Debug)]
+pub struct SyncEvent {
+    source: String,
+    artwork: PixivArtwork,
+    contents: Vec<UnsyncContent<ArchiveRequest>>,
+    thumb: Option<UnsyncFileMeta<ArchiveRequest>>,
+    comments: Vec<Comment>,
+    files: tokio::sync::oneshot::Receiver<HashMap<String, TempPath>>,
+}
+
+define_tasks! {
+    PixivSystem
+    pipelines {
+        users_pipeline: PixivUserId,
+        series_pipeline: PixivSeriesId,
+        artworks_pipeline: PixivArtworkId,
+        files_pipeline: FileEvent,
+        sync_pipeline: SyncEvent,
+    }
+    vars {
+        manager: Manager,
+        config: Config,
+        client: ArchiveClient,
+    }
+    tasks {
+        resolve_main,
+        reslove_current_user,
+        reslove_users,
+        reslove_series,
+        resolve_artworks,
+        archive_artworks,
+        download_files,
+    }
+}
+
+async fn resolve_main(
+    users_pipeline: Input<PixivUserId>,
+    series_pipeline: Input<PixivSeriesId>,
+    artworks_pipeline: Input<PixivArtworkId>,
     config: &Config,
-    tx_users: UnboundedSender<PixivUserId>,
-    tx_series: UnboundedSender<PixivSeriesId>,
-    tx_artworks: UnboundedSender<PixivArtworkId>,
 ) {
     for user in &config.users {
-        info!("[main] Archive user: {user}");
-        tx_users.send(*user).unwrap();
+        info!("[main] Archive user: {user:?}");
+        users_pipeline.send(*user).unwrap();
     }
 
-    for post in config
-        .illusts
-        .iter()
-        .cloned()
-        .map(PixivArtworkId::Illust)
-        .chain(config.novels.iter().cloned().map(PixivArtworkId::Novel))
-    {
-        info!("[main] Archive artwork: {post:?}");
-        tx_artworks.send(post).unwrap();
+    macro_rules! remap {
+        ($series: expr, $fn: expr) => {
+            $series.iter().cloned().map($fn)
+        };
     }
 
-    for series in config
-        .illust_series
-        .iter()
-        .cloned()
-        .map(PixivSeriesId::Illust)
-        .chain(
-            config
-                .novel_series
-                .iter()
-                .cloned()
-                .map(PixivSeriesId::Novel),
-        )
-    {
-        info!("[main] Archive series: {series:?}");
-        tx_series.send(series).unwrap();
+    for illust_series in remap!(config.illust_series, PixivSeriesId::Illust) {
+        info!("[main] Archive Illust Series: {illust_series:?}");
+        series_pipeline.send(illust_series).unwrap();
+    }
+    for novel_series in remap!(config.novel_series, PixivSeriesId::Novel) {
+        info!("[main] Archive Novel Series: {novel_series:?}");
+        series_pipeline.send(novel_series).unwrap();
+    }
+
+    for illusts in remap!(config.illusts, PixivArtworkId::Illust) {
+        info!("[main] Archive Illusts: {illusts:?}");
+        artworks_pipeline.send(illusts).unwrap();
+    }
+    for novels in remap!(config.novels, PixivArtworkId::Novel) {
+        info!("[main]   Novel Series: {novels:?}");
+        artworks_pipeline.send(novels).unwrap();
     }
 }
 
@@ -169,10 +193,29 @@ impl<T> PixivResponseUnwrap<T> {
     }
 }
 
+pub fn client(config: &Config) -> ArchiveClient {
+    ArchiveClient::builder(
+        Client::builder()
+            .default_headers(HeaderMap::from_iter([
+                (
+                    COOKIE,
+                    HeaderValue::from_str(&format!("PHPSESSID={}", config.session)).unwrap(),
+                ),
+                (
+                    REFERER,
+                    HeaderValue::from_str("https://www.pixiv.net/").unwrap(),
+                ),
+            ]))
+            .user_agent(&config.user_agent)
+            .build()
+            .unwrap(),
+        config.limit,
+    )
+    .build()
+}
 pub async fn fetch<T: DeserializeOwned>(client: &ArchiveClient, url: &str) -> Result<T> {
-    debug!("[fetch] Fetching: {url}");
     client
         .fetch::<PixivResponse<T>>(url)
-        .await 
+        .await
         .and_then(|r| r.downcast())
 }

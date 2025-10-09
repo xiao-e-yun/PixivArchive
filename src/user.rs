@@ -1,27 +1,24 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     fmt::Debug,
-    sync::Arc,
 };
 
 use log::{debug, error, info};
+use plyne::{Input, Output};
 use post_archiver::{
     AuthorId, PlatformId,
     importer::{UnsyncAlias, UnsyncAuthor},
     manager::PostArchiverManager,
 };
-use post_archiver_utils::ArchiveClient;
+use post_archiver_utils::{ArchiveClient, Error, Result};
 use serde::Deserialize;
-use tokio::sync::{
-    Mutex, MutexGuard,
-    mpsc::{UnboundedReceiver, UnboundedSender},
-};
+use tokio::sync::MutexGuard;
 use tokio::task::JoinSet;
 
 use crate::{
     NullableBody,
     artwork::{PixivArtwork, PixivArtworkId},
-    config::{Config, ProgressManager},
+    config::{Config, Progress},
     fetch,
 };
 
@@ -74,23 +71,23 @@ impl PixivUserArtworks {
 }
 
 pub async fn reslove_users(
+    mut users_pipeline: Output<PixivUserId>,
+    artworks_pipeline: Input<PixivArtworkId>,
     config: &Config,
-    client: ArchiveClient,
-    mut rx: UnboundedReceiver<PixivUserId>,
-    tx: UnboundedSender<PixivArtworkId>,
+    client: &ArchiveClient,
 ) {
     let mut join_set = JoinSet::new();
-    let pb = ProgressManager::new(config.multi.clone(), "user");
+    let pb = Progress::new(config.multi.clone(), "user");
 
     debug!("[user] Waiting for user to resolve");
-    while let Some(user) = rx.recv().await {
+    while let Some(user) = users_pipeline.recv().await {
         let pb = pb.clone();
         pb.inc_length(1);
 
         let client = client.clone();
-        let tx = tx.clone();
+        let tx = artworks_pipeline.clone();
         join_set.spawn(async move {
-            reslove_user(client, tx, user).await;
+            reslove_user(tx, client, user).await;
             info!("[user] Resolved {user}");
             pb.inc(1);
         });
@@ -104,7 +101,7 @@ pub async fn reslove_users(
     info!("[user] Resolve finished");
 }
 
-async fn reslove_user(client: ArchiveClient, tx: UnboundedSender<PixivArtworkId>, id: PixivUserId) {
+async fn reslove_user(tx: Input<PixivArtworkId>, client: ArchiveClient, id: PixivUserId) {
     let url = format!("https://www.pixiv.net/ajax/user/{id}/profile/all?lang=ja");
     let user_artworks = match fetch::<PixivUserArtworks>(&client, &url).await {
         Ok(artworks) => artworks,
@@ -133,7 +130,7 @@ async fn reslove_user(client: ArchiveClient, tx: UnboundedSender<PixivArtworkId>
 #[derive(Debug, Clone)]
 pub struct UserManager {
     pub platform: PlatformId,
-    inner: Arc<Mutex<HashMap<String, AuthorId>>>,
+    inner: HashMap<String, AuthorId>,
 }
 
 impl UserManager {
@@ -143,35 +140,23 @@ impl UserManager {
             inner: Default::default(),
         }
     }
-    pub async fn get<'a>(
-        &self,
-        manager: &MutexGuard<'a, PostArchiverManager>,
+    pub fn import(
+        &mut self,
+        manager: &MutexGuard<'_, PostArchiverManager>,
         artwork: &PixivArtwork,
-    ) -> Option<AuthorId> {
-        let mut inner = self.inner.lock().await;
-        match inner.entry(artwork.user_id.clone()) {
-            Entry::Occupied(occupied_entry) => Some(*occupied_entry.get()),
-            Entry::Vacant(vacant_entry) => {
-                match UnsyncAuthor::new(artwork.user_name.clone())
-                    .aliases(vec![
-                        UnsyncAlias::new(self.platform, artwork.user_id.clone())
-                            .link(format!("https://www.pixiv.net/users/{}", artwork.user_id)),
-                    ])
-                    .sync(manager)
-                {
-                    Ok(author) => {
-                        vacant_entry.insert(author);
-                        Some(author)
-                    }
-                    Err(e) => {
-                        error!(
-                            "[user] Failed to create author for {}: {:?}",
-                            artwork.user_id, e
-                        );
-                        None
-                    }
-                }
-            }
+    ) -> Result<AuthorId> {
+        match self.inner.entry(artwork.user_id.clone()) {
+            Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
+            Entry::Vacant(vacant_entry) => UnsyncAuthor::new(artwork.user_name.clone())
+                .aliases(vec![
+                    UnsyncAlias::new(self.platform, artwork.user_id.clone())
+                        .link(format!("https://www.pixiv.net/users/{}", artwork.user_id)),
+                ])
+                .sync(manager)
+                .inspect(|id| {
+                    vacant_entry.insert(*id);
+                })
+                .map_err(Error::from),
         }
     }
 }

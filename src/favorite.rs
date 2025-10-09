@@ -1,9 +1,10 @@
 use crate::{Config, artwork::PixivArtworkId, fetch, user::PixivUserId};
 
 use log::{debug, error, info, warn};
+use plyne::Input;
 use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
-use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PixivUserStatusOuter {
@@ -18,10 +19,10 @@ pub struct PixivUserStatus {
 }
 
 pub async fn reslove_current_user(
-    config: &Config,
+    users_pipeline: Input<PixivUserId>,
+    artworks_pipeline: Input<PixivArtworkId>,
     client: &ArchiveClient,
-    tx_artwork: UnboundedSender<PixivArtworkId>,
-    tx_user: UnboundedSender<PixivUserId>,
+    config: &Config,
 ) {
     if !(config.favorite || config.followed_users) {
         debug!("[current_user] Skipping favorites and following users archiving");
@@ -46,14 +47,14 @@ pub async fn reslove_current_user(
     let mut join_set = JoinSet::new();
     if config.followed_users {
         info!("[following] Archiving followed users");
-        join_set.spawn(reslove_following(client.clone(), tx_user, user));
+        join_set.spawn(reslove_following(users_pipeline, client.clone(), user));
     }
 
     if config.favorite {
         for ty in ["illusts", "novels"] {
             info!("[favorite] Fetching favorites of {ty}");
-            let tx_artwork = tx_artwork.clone();
-            join_set.spawn(reslove_favorite(client.clone(), tx_artwork, ty, user));
+            let tx_artwork = artworks_pipeline.clone();
+            join_set.spawn(reslove_favorite(tx_artwork, client.clone(), ty, user));
         }
     }
 
@@ -79,8 +80,8 @@ pub enum PixivFavoriteWorkId {
 }
 
 pub async fn reslove_favorite(
+    tx: Input<PixivArtworkId>,
     client: ArchiveClient,
-    tx: UnboundedSender<PixivArtworkId>,
     ty: &'static str,
     user: u64,
 ) {
@@ -111,8 +112,8 @@ pub async fn reslove_favorite(
                 PixivFavoriteWorkId::Common(id) => id.parse::<u64>().unwrap(),
                 PixivFavoriteWorkId::Unreachable(id) => {
                     warn!("[favorite] Unreachable favorite artwork {id}, skipping");
-                    continue
-                },
+                    continue;
+                }
             };
             let id = match ty {
                 "illusts" => PixivArtworkId::Illust(id),
@@ -136,7 +137,7 @@ pub struct PixivFollowing {
 pub struct PixivFollowingUser {
     pub user_id: u64,
 }
-pub async fn reslove_following(client: ArchiveClient, tx: UnboundedSender<PixivUserId>, user: u64) {
+pub async fn reslove_following(tx: Input<PixivUserId>, client: ArchiveClient, user: u64) {
     let mut page = 0;
     let mut total = 1;
     const LIMIT: usize = 100;
@@ -159,10 +160,9 @@ pub async fn reslove_following(client: ArchiveClient, tx: UnboundedSender<PixivU
             }
         };
         total = response.total;
-
-        for PixivFollowingUser { user_id } in response.users {
-            info!("[following] Archive favorite artwork: {user_id}");
-            tx.send(user_id).unwrap();
+        for PixivFollowingUser { user_id } in response.users.iter() {
+            info!("[following] Found following user: {user_id}");
+            tx.send(*user_id).unwrap();
         }
     }
 }

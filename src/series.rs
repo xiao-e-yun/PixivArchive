@@ -1,14 +1,12 @@
 use log::{debug, error, info};
+use plyne::{Input, Output};
 use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
-use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
-    task::JoinSet,
-};
+use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
 
 use crate::{
     artwork::PixivArtworkId,
-    config::{Config, ProgressManager},
+    config::{Config, Progress},
     fetch,
 };
 
@@ -61,21 +59,21 @@ pub struct PixivNovelSeriesPageWork {
 }
 
 pub async fn reslove_series(
+    mut series_pipeline: Output<PixivSeriesId>,
+    artworks_pipeline: Input<PixivArtworkId>,
     config: &Config,
     client: &ArchiveClient,
-    mut rx: UnboundedReceiver<PixivSeriesId>,
-    tx: UnboundedSender<PixivArtworkId>,
 ) {
     let mut join_set = JoinSet::new();
-    let pb = ProgressManager::new(config.multi.clone(), "series");
+    let pb = Progress::new(config.multi.clone(), "series");
 
     debug!("[series] Waiting for series to resolve");
-    while let Some(series) = rx.recv().await {
+    while let Some(series) = series_pipeline.recv().await {
         let pb = pb.clone();
         pb.inc_length(1);
 
         let client = client.clone();
-        let tx = tx.clone();
+        let tx = artworks_pipeline.clone();
         join_set.spawn(async move {
             reslove_series_single(client, tx, series).await;
             info!("[series] Resolved {}", series.id());
@@ -134,11 +132,13 @@ async fn reslove_series_single(
 
         total = series.page.total;
         for artwork in series.page.series {
-            tx.send(PixivArtworkId::Illust(artwork.work_id.parse().unwrap())).unwrap();
+            tx.send(PixivArtworkId::Illust(artwork.work_id.parse().unwrap()))
+                .unwrap();
         }
 
         for artwork in series.page.series_contents {
-            tx.send(PixivArtworkId::Novel(artwork.id.parse().unwrap())).unwrap();
+            tx.send(PixivArtworkId::Novel(artwork.id.parse().unwrap()))
+                .unwrap();
         }
     }
 }

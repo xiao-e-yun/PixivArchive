@@ -65,8 +65,12 @@ pub async fn get_comments(
             user: comment.user_name,
             text: [
                 comment.content,
-                comment.stamp_id.map(|id| format!("(Stamp {id})")).unwrap_or_default()
-            ].join(" "),
+                comment
+                    .stamp_id
+                    .map(|id| format!("(Stamp {id})"))
+                    .unwrap_or_default(),
+            ]
+            .join(" "),
             replies,
         }
     }))

@@ -1,21 +1,19 @@
-use std::{collections::HashSet, fs::File, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use fast_image_resize::{ResizeOptions, Resizer};
+use futures::future::try_join_all;
 use image::{DynamicImage, ImageReader};
-use log::{debug, error, info};
-use post_archiver_utils::ArchiveClient;
-use reqwest::{
-    Client,
-    header::{COOKIE, HeaderMap, HeaderValue, REFERER},
-};
+use log::{error, warn};
+use plyne::Output;
+use post_archiver_utils::{ArchiveClient, Result};
 use serde::Deserialize;
-use tokio::{
-    fs,
-    sync::{Semaphore, mpsc::UnboundedReceiver},
-    task::JoinSet,
-};
+use tempfile::TempPath;
+use tokio::{sync::Semaphore, task::JoinSet};
 
-use crate::config::{Config, ProgressManager};
+use crate::{
+    FileEvent, client,
+    config::{Config, Progress},
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum ArchiveRequest {
@@ -39,13 +37,6 @@ impl ArchiveRequest {
             ArchiveRequest::Ugoira { url, .. } => url,
         }
     }
-
-    pub fn size(&self) -> Option<(u32, u32)> {
-        match self {
-            ArchiveRequest::ImageWithSize { width, height, .. } => Some((*width, *height)),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,114 +53,97 @@ pub struct PixivUgoiraFrame {
     pub file: String,
 }
 
-pub async fn archive_files(config: &Config, mut rx: UnboundedReceiver<(PathBuf, ArchiveRequest)>) {
-    let client = ArchiveClient::new(
-        Client::builder()
-            .default_headers(HeaderMap::from_iter([
-                (
-                    COOKIE,
-                    HeaderValue::from_str(&format!("PHPSESSID={}", config.session)).unwrap(),
-                ),
-                (
-                    REFERER,
-                    HeaderValue::from_str("https://www.pixiv.net/").unwrap(),
-                ),
-            ]))
-            .user_agent(&config.user_agent)
-            .build()
-            .unwrap(),
-        config.limit,
-    );
+pub async fn download_files(mut files_pipeline: Output<FileEvent>, config: &Config) {
+    let files_pb = Progress::new(config.multi.clone(), "files");
 
-    let mut join_set = JoinSet::new();
-    let pb = ProgressManager::new(config.multi.clone(), "file");
-
-    let mut created_folders = HashSet::new();
-
-    debug!("[file] Waiting for file to download");
+    let mut tasks = JoinSet::new();
+    let client = client(config);
     let semaphore = Arc::new(Semaphore::new(3));
-    while let Some((path, request)) = rx.recv().await {
-        let pb = pb.clone();
-        pb.inc_length(1);
-
-        if !config.overwrite && path.exists() {
-            info!("[file] File already exists, skipping: {}", path.display());
-            pb.inc(1);
+    while let Some((reqs, tx)) = files_pipeline.recv().await {
+        if reqs.is_empty() {
+            tx.send(Default::default()).unwrap();
             continue;
         }
 
-        let folder = path.parent().unwrap();
-        if !created_folders.contains(folder) && !folder.exists() {
-            debug!("[file] Creating post folder: {}", folder.display());
-            created_folders.insert(folder.to_path_buf());
-            if let Err(e) = fs::create_dir_all(folder).await {
-                error!("[file] Failed to create post folder: {e:?}");
-            };
-        };
-
-        let client = client.clone();
         let semaphore = semaphore.clone();
-        join_set.spawn(async move {
-            let _ = semaphore.acquire().await.unwrap();
-            info!("[file] Download: {}", path.display());
-
-            if archive_file(client, path.clone(), request).await.is_none() {
-                error!("[file] Failed to download {}", path.display());
-                return;
-            };
-
-            info!("[file] Downloaded {}", path.display());
-            pb.inc(1);
+        let files_pb = files_pb.clone();
+        let client = client.clone();
+        files_pb.inc_length(reqs.len() as u64);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            match try_join_all(reqs.into_iter().map(async |req| {
+                let url = req.url().to_string();
+                let result = download_file(req, &client).await.map(|dst| (url, dst));
+                files_pb.inc(1);
+                result
+            }))
+            .await
+            {
+                Ok(results) => tx.send(results.into_iter().collect()).unwrap(),
+                Err(e) => error!("Failed to download files: {e}"),
+            }
         });
     }
 
-    if join_set.is_empty() {
-        return;
-    }
-    join_set.join_all().await;
-
-    info!("[file] Download finished");
+    tasks.join_all().await;
+    files_pb.finish();
 }
 
-pub async fn archive_file(
-    client: ArchiveClient,
-    path: PathBuf,
-    request: ArchiveRequest,
-) -> Option<()> {
-    let mut file = match &request {
-        ArchiveRequest::Image(_) | ArchiveRequest::ImageWithSize { .. } => File::create(&path),
-        ArchiveRequest::Ugoira { .. } => tempfile::tempfile(),
-    }
-    .ok()?;
+async fn download_file(request: ArchiveRequest, client: &ArchiveClient) -> Result<TempPath> {
+    let dst = client.download(request.url()).await?;
 
-    debug!("[file] Downloading: {}", request.url());
-    if let Err(e) = client.download(request.url(), &mut file).await {
-        error!("[file] Failed to download {}: {}", request.url(), e);
-        return None;
-    }
-
-    // TODO: move resizer to a separate thread
-    if let Some((width, height)) = request.size() {
-        let src_image = ImageReader::open(&path).unwrap().decode().unwrap();
-        if src_image.width() != width || src_image.height() != height {
-            let mut dst_image = DynamicImage::new(width, height, src_image.color());
-
-            let mut resizer = Resizer::new();
-            resizer
-                .resize(
-                    &src_image,
-                    &mut dst_image,
-                    &Some(ResizeOptions::new().fit_into_destination(None)),
-                )
-                .unwrap();
-
-            dst_image.save(path).ok()?;
+    match request {
+        ArchiveRequest::Image(_) => Ok(dst),
+        ArchiveRequest::ImageWithSize {
+            url: _,
+            width,
+            height,
+        } => {
+            // TODO: move resizer to a separate thread
+            resize(dst, width, height)
         }
-    };
-
-    if let ArchiveRequest::Ugoira {  .. } = request {
-        todo!("Handle Ugoira frames");
+        ArchiveRequest::Ugoira { url, frames: _ } => {
+            error!("Ugoira download not implemented yet: {url}");
+            Err("Ugoira download not implemented yet")
+        }
     }
+    .map_err(|e: &'static str| {
+        error!("Failed to process file: {e}");
+        post_archiver_utils::Error::InvalidResponse(e.to_string())
+    })
+}
 
-    Some(())
+fn resize(path: TempPath, width: u32, height: u32) -> std::result::Result<TempPath, &'static str> {
+    let src_image = ImageReader::open(&path)
+        .map_err(|e| {
+            warn!("Failed to open image: {e}");
+            "Failed to open image"
+        })?
+        .decode()
+        .map_err(|e| {
+            warn!("Failed to decode image: {e}");
+            "Failed to decode image"
+        })?;
+
+    if src_image.width() != width || src_image.height() != height {
+        let mut dst_image = DynamicImage::new(width, height, src_image.color());
+
+        let mut resizer = Resizer::new();
+        resizer
+            .resize(
+                &src_image,
+                &mut dst_image,
+                &Some(ResizeOptions::new().fit_into_destination(None)),
+            )
+            .map_err(|e| {
+                warn!("Failed to resize image: {e}");
+                "Failed to resize image"
+            })?;
+
+        dst_image.save(&path).map_err(|e| {
+            warn!("Failed to save resized image: {e}");
+            "Failed to save resized image"
+        })?;
+    }
+    Ok(path)
 }

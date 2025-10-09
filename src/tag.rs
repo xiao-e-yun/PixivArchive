@@ -1,4 +1,4 @@
-use post_archiver::{importer::UnsyncTag, PlatformId};
+use post_archiver::{PlatformId, importer::UnsyncTag};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]

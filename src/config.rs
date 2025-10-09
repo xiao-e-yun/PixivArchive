@@ -54,8 +54,8 @@ pub struct Config {
     #[arg(short, long, default_value = "")]
     pub user_agent: String,
     /// Limit the number of concurrent copys
-    #[arg(short, long, default_value = "40")]
-    pub limit: usize,
+    #[arg(short, long, default_value = "30")]
+    pub limit: u32,
     #[command(flatten)]
     pub verbose: Verbosity<InfoLevel>,
     #[clap(skip)]
@@ -102,19 +102,17 @@ pub enum ArchiveCategory {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProgressManager {
-    pub multi: MultiProgress,
-    pub root: ProgressBar,
-}
+pub struct Progress(ProgressBar);
 
-impl ProgressManager {
+impl Progress {
     pub fn new(multi: MultiProgress, prefix: &'static str) -> Self {
-        let root = multi.add(
-            ProgressBar::new(0)
-                .with_style(Self::style())
-                .with_prefix(format!("[{prefix}]"))
-        );
-        Self { multi, root }
+        Self(
+            multi.add(
+                ProgressBar::new(0)
+                    .with_style(Self::style())
+                    .with_prefix(format!("[{prefix}]")),
+            ),
+        )
     }
 
     fn style() -> ProgressStyle {
@@ -124,10 +122,10 @@ impl ProgressManager {
     }
 }
 
-impl Deref for ProgressManager {
+impl Deref for Progress {
     type Target = ProgressBar;
 
     fn deref(&self) -> &Self::Target {
-        &self.root
+        &self.0
     }
 }
