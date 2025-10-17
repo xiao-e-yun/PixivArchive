@@ -16,12 +16,13 @@ impl PixivTags {
             .iter()
             .map(|tag| {
                 let name = tag.tag.clone();
-                let platform = match name.as_str() {
-                    "R-18" | "R-18G" => None,
-                    _ => Some(platform),
-                };
 
-                UnsyncTag { name, platform }
+                let is_r18 = matches!(name.as_str(), "R-18" | "R-18G");
+                if is_r18 {
+                    UnsyncTag { name: name.to_lowercase(), platform: None }
+                } else {
+                    UnsyncTag { name, platform: Some(platform) }
+                }
             })
             .collect()
     }
