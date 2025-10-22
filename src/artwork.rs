@@ -235,6 +235,7 @@ pub async fn resolve_artworks(
         });
     }
 
+    tasks.join_all().await;
     info!("[artwork] Archive resolved");
 }
 
