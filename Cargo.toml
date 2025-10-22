@@ -34,3 +34,5 @@ serde_repr = "0.1.20"
 serde_with = "3.14.0"
 tempfile = "3.20.0"
 tokio = { version = "1.46.1", features = ["macros", "rt"] }
+html2md = "0.2.15"
+percent-encoding = "2.3.2"

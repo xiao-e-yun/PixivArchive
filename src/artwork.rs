@@ -359,13 +359,66 @@ pub async fn archive_artworks(mut sync_pipeline: Output<SyncEvent>, manager: &Ma
 }
 
 mod common {
+    use html2md::TagHandler;
+
     use super::*;
 
     pub fn parse_description(artwork: &PixivArtwork) -> Vec<UnsyncContent<ArchiveRequest>> {
-        vec![UnsyncContent::Text(format!(
-            "> {}",
-            artwork.description.trim().replace('\n', "\n> ")
-        ))]
+        struct AnchorHandlerFactory;
+        impl html2md::TagHandlerFactory for AnchorHandlerFactory {
+            fn instantiate(&self) -> Box<dyn html2md::TagHandler> {
+                Box::new(AnchorHandler(html2md::anchors::AnchorHandler::default()))
+            }
+        }
+
+        struct AnchorHandler(html2md::anchors::AnchorHandler);
+        impl TagHandler for AnchorHandler {
+            fn handle(&mut self, tag: &html2md::Handle, printer: &mut html2md::StructuredPrinter) {
+                // replace a.href /jump.php to normal link
+                info!(
+                    "[artwork][description] Processing anchor href: {:?}",
+                    tag.data
+                );
+                if let html2md::NodeData::Element { attrs, .. } = &tag.data
+                    && let mut attrs = attrs.borrow_mut()
+                    && let Some(href) = attrs
+                        .iter_mut()
+                        .find(|attr| attr.name.local.to_string() == "href")
+                        .filter(|attr| attr.value.to_string().starts_with("/jump.php?"))
+                {
+                    const PREFIX: usize = "/jump.php?".len();
+                    let url = &href.value[PREFIX..];
+                    let decoded = percent_encoding::percent_decode_str(url)
+                        .decode_utf8()
+                        .unwrap();
+
+                    href.value = decoded.to_string().into();
+                };
+                self.0.handle(tag, printer);
+            }
+
+            fn after_handle(&mut self, printer: &mut html2md::StructuredPrinter) {
+                self.0.after_handle(printer);
+            }
+        }
+
+        let mut markdown = html2md::parse_html_custom(
+            &artwork.description,
+            &HashMap::from([(
+                "a".to_string(),
+                Box::new(AnchorHandlerFactory) as Box<dyn html2md::TagHandlerFactory>,
+            )]),
+        );
+
+        if matches!(&artwork.content, PixivArtworkContent::Novel { .. }) {
+            markdown = markdown
+                .lines()
+                .map(|line| format!("> {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+
+        vec![UnsyncContent::Text(markdown)]
     }
 
     pub fn parse_date(date: &str) -> DateTime<Utc> {
