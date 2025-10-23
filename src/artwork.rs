@@ -364,6 +364,12 @@ mod common {
     use super::*;
 
     pub fn parse_description(artwork: &PixivArtwork) -> Vec<UnsyncContent<ArchiveRequest>> {
+
+        let description = artwork.description.trim();
+        if description.is_empty() {
+            return vec![];
+        }
+
         struct AnchorHandlerFactory;
         impl html2md::TagHandlerFactory for AnchorHandlerFactory {
             fn instantiate(&self) -> Box<dyn html2md::TagHandler> {
@@ -403,7 +409,7 @@ mod common {
         }
 
         let mut markdown = html2md::parse_html_custom(
-            &artwork.description,
+            description,
             &HashMap::from([(
                 "a".to_string(),
                 Box::new(AnchorHandlerFactory) as Box<dyn html2md::TagHandlerFactory>,
