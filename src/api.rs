@@ -83,10 +83,6 @@ impl PixivClient {
             .and_then(|r| r.downcast())
     }
 
-    pub fn into_inner(self) -> ArchiveClient {
-        self.inner
-    }
-
     pub fn as_inner(&self) -> &ArchiveClient {
         &self.inner
     }
