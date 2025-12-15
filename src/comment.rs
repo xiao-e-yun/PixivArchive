@@ -1,10 +1,9 @@
 use futures::future::join_all;
 use log::error;
 use post_archiver::Comment;
-use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
 
-use crate::fetch;
+use crate::api::PixivClient;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +30,7 @@ pub struct PixivComment {
 }
 
 pub async fn get_comments(
-    client: &ArchiveClient,
+    client: &PixivClient,
     id: &str,
     is_novel: bool,
     is_root: bool,
@@ -46,7 +45,7 @@ pub async fn get_comments(
         }
     };
 
-    let PixivComments { comments, .. } = fetch(client, &url)
+    let PixivComments { comments, .. } = client.fetch(&url)
         .await
         .inspect_err(|e| {
             let cty = if is_root { "comments" } else { "replies" };

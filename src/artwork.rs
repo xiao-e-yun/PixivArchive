@@ -8,7 +8,7 @@ use post_archiver::{
     Comment,
     importer::{UnsyncCollection, UnsyncContent, UnsyncFileMeta, UnsyncPost},
 };
-use post_archiver_utils::{ArchiveClient, Result};
+use post_archiver_utils::Result;
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::json;
@@ -22,8 +22,8 @@ use tokio::{
 
 use crate::{
     FileEvent, Manager, SyncEvent,
+    api::PixivClient,
     config::{Config, Progress},
-    fetch,
     file::{ArchiveRequest, PixivUgoira},
     tag::PixivTags,
     user::UserManager,
@@ -174,7 +174,7 @@ pub async fn resolve_artworks(
     mut artworks_pipeline: Output<PixivArtworkId>,
     files_pipeline: Input<FileEvent>,
     sync_pipeline: Input<SyncEvent>,
-    client: &ArchiveClient,
+    client: &PixivClient,
     manager: &Manager,
     config: &Config,
 ) {
@@ -196,7 +196,7 @@ pub async fn resolve_artworks(
         tasks.spawn(async move {
             let source = id.url();
 
-            let artwork = match fetch::<PixivArtwork>(&client, &id.api_url()).await {
+            let artwork = match client.fetch::<PixivArtwork>(&id.api_url()).await {
                 Ok(artwork) => artwork,
                 Err(e) => {
                     error!("[artwork] Failed to fetch {source}: {e:?}");
@@ -431,7 +431,7 @@ mod common {
         DateTime::parse_from_rfc3339(date).unwrap().to_utc()
     }
 
-    pub async fn get_comments(client: &ArchiveClient, artwork: &PixivArtwork) -> Vec<Comment> {
+    pub async fn get_comments(client: &PixivClient, artwork: &PixivArtwork) -> Vec<Comment> {
         if artwork.has_comment() {
             crate::comment::get_comments(
                 client,
@@ -456,7 +456,7 @@ mod common {
     }
 
     pub async fn get_contents_and_thumb(
-        client: &ArchiveClient,
+        client: &PixivClient,
         artwork: &PixivArtwork,
     ) -> (
         Vec<UnsyncContent<ArchiveRequest>>,
@@ -482,8 +482,7 @@ mod common {
                     }
                     IllustType::Ugoira => {
                         let extra = thumb.as_ref().unwrap().extra.clone();
-                        let ugoira = match fetch::<PixivUgoira>(
-                            client,
+                        let ugoira = match client.fetch::<PixivUgoira>(
                             &format!(
                                 "https://www.pixiv.net/ajax/illust/{}/ugoira_meta",
                                 &artwork.id
@@ -530,11 +529,10 @@ mod illust {
     use super::*;
 
     pub async fn fetch_pages(
-        client: &ArchiveClient,
+        client: &PixivClient,
         artwork_id: &str,
     ) -> Result<Vec<UnsyncFileMeta<ArchiveRequest>>> {
-        let pages = fetch::<Vec<PixivIllustPages>>(
-            client,
+        let pages = client.fetch::<Vec<PixivIllustPages>>(
             &format!(
                 "https://www.pixiv.net/ajax/illust/{}/pages?lang=ja",
                 &artwork_id

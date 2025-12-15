@@ -1,13 +1,12 @@
 use log::{debug, error, info};
 use plyne::{Input, Output};
-use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
 use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
 
 use crate::{
+    api::PixivClient,
     artwork::PixivArtworkId,
     config::{Config, Progress},
-    fetch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -62,7 +61,7 @@ pub async fn reslove_series(
     mut series_pipeline: Output<PixivSeriesId>,
     artworks_pipeline: Input<PixivArtworkId>,
     config: &Config,
-    client: &ArchiveClient,
+    client: &PixivClient,
 ) {
     let mut join_set = JoinSet::new();
     let pb = Progress::new(config.multi.clone(), "series");
@@ -90,7 +89,7 @@ pub async fn reslove_series(
 }
 
 async fn reslove_series_single(
-    client: ArchiveClient,
+    client: PixivClient,
     tx: UnboundedSender<PixivArtworkId>,
     series: PixivSeriesId,
 ) {
@@ -118,7 +117,7 @@ async fn reslove_series_single(
             }
         };
 
-        let series = match fetch::<PixivSeries>(&client, &series_url).await {
+        let series = match client.fetch::<PixivSeries>(&series_url).await {
             Ok(response) => response,
             Err(e) => {
                 let ty = match &series {

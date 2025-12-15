@@ -10,16 +10,15 @@ use post_archiver::{
     importer::{UnsyncAlias, UnsyncAuthor},
     manager::PostArchiverManager,
 };
-use post_archiver_utils::{ArchiveClient, Error, Result};
+use post_archiver_utils::{Error, Result};
 use serde::Deserialize;
 use tokio::sync::MutexGuard;
 use tokio::task::JoinSet;
 
 use crate::{
-    NullableBody,
+    api::{NullableBody, PixivClient},
     artwork::{PixivArtwork, PixivArtworkId},
     config::{Config, Progress},
-    fetch,
 };
 
 pub type PixivUserId = u64;
@@ -74,7 +73,7 @@ pub async fn reslove_users(
     mut users_pipeline: Output<PixivUserId>,
     artworks_pipeline: Input<PixivArtworkId>,
     config: &Config,
-    client: &ArchiveClient,
+    client: &PixivClient,
 ) {
     let mut join_set = JoinSet::new();
     let pb = Progress::new(config.multi.clone(), "user");
@@ -101,9 +100,9 @@ pub async fn reslove_users(
     info!("[user] Resolve finished");
 }
 
-async fn reslove_user(tx: Input<PixivArtworkId>, client: ArchiveClient, id: PixivUserId) {
+async fn reslove_user(tx: Input<PixivArtworkId>, client: PixivClient, id: PixivUserId) {
     let url = format!("https://www.pixiv.net/ajax/user/{id}/profile/all?lang=ja");
-    let user_artworks = match fetch::<PixivUserArtworks>(&client, &url).await {
+    let user_artworks = match client.fetch::<PixivUserArtworks>(&url).await {
         Ok(artworks) => artworks,
         Err(e) => {
             error!("[user] Failed to fetch {id}: {e:?}");
