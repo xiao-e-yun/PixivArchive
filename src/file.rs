@@ -5,13 +5,14 @@ use futures::future::try_join_all;
 use image::{DynamicImage, ImageReader};
 use log::{error, warn};
 use plyne::Output;
-use post_archiver_utils::{ArchiveClient, Result};
+use post_archiver_utils::Result;
 use serde::Deserialize;
 use tempfile::TempPath;
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
-    FileEvent, client,
+    FileEvent,
+    api::PixivClient,
     config::{Config, Progress},
 };
 
@@ -57,7 +58,7 @@ pub async fn download_files(mut files_pipeline: Output<FileEvent>, config: &Conf
     let files_pb = Progress::new(config.multi.clone(), "files");
 
     let mut tasks = JoinSet::new();
-    let client = client(config);
+    let client = PixivClient::new(config);
     let semaphore = Arc::new(Semaphore::new(3));
     while let Some((reqs, tx)) = files_pipeline.recv().await {
         if reqs.is_empty() {
@@ -89,8 +90,8 @@ pub async fn download_files(mut files_pipeline: Output<FileEvent>, config: &Conf
     files_pb.finish();
 }
 
-async fn download_file(request: ArchiveRequest, client: &ArchiveClient) -> Result<TempPath> {
-    let dst = client.download(request.url()).await?;
+async fn download_file(request: ArchiveRequest, client: &PixivClient) -> Result<TempPath> {
+    let dst = client.as_inner().download(request.url()).await?;
 
     match request {
         ArchiveRequest::Image(_) => Ok(dst),

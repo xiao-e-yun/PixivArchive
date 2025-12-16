@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use api::PixivClient;
 use artwork::{PixivArtwork, PixivArtworkId, archive_artworks, resolve_artworks};
 use config::Config;
 use favorite::reslove_current_user;
@@ -11,17 +12,13 @@ use post_archiver::{
     importer::{UnsyncContent, UnsyncFileMeta},
     manager::PostArchiverManager,
 };
-use post_archiver_utils::{ArchiveClient, Error, Result, display_metadata};
-use reqwest::{
-    Client,
-    header::{COOKIE, HeaderMap, HeaderValue, REFERER},
-};
-use serde::{Deserialize, de::DeserializeOwned};
+use post_archiver_utils::display_metadata;
 use series::{PixivSeriesId, reslove_series};
 use tempfile::TempPath;
 use tokio::sync::Mutex;
 use user::{PixivUserId, reslove_users};
 
+pub mod api;
 pub mod artwork;
 pub mod comment;
 pub mod config;
@@ -66,7 +63,7 @@ async fn main() {
     info!("[main] Connecting to PostArchiver");
     let manager = PostArchiverManager::open_or_create(&config.output).unwrap();
 
-    let client = client(&config);
+    let client = PixivClient::new(&config);
 
     PixivSystem::new(Mutex::new(manager), config, client)
         .execute()
@@ -104,7 +101,7 @@ define_tasks! {
     vars {
         manager: Manager,
         config: Config,
-        client: ArchiveClient,
+        client: PixivClient,
     }
     tasks {
         resolve_main,
@@ -153,69 +150,3 @@ async fn resolve_main(
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct PixivResponse<T> {
-    pub error: bool,
-    pub message: String,
-    pub body: NullableBody<T>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum NullableBody<T> {
-    Some(T),
-    None([(); 0]),
-}
-
-impl<T> PixivResponse<T> {
-    pub fn downcast(self) -> Result<T> {
-        match self.body {
-            NullableBody::Some(body) => Ok(body),
-            NullableBody::None(_) => Err(Error::InvalidResponse(self.message)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PixivResponseUnwrap<T> {
-    pub error: bool,
-    pub message: String,
-    pub body: T,
-}
-
-impl<T> PixivResponseUnwrap<T> {
-    pub fn downcast(self) -> Result<T> {
-        if self.error {
-            Err(Error::InvalidResponse(self.message))
-        } else {
-            Ok(self.body)
-        }
-    }
-}
-
-pub fn client(config: &Config) -> ArchiveClient {
-    ArchiveClient::builder(
-        Client::builder()
-            .default_headers(HeaderMap::from_iter([
-                (
-                    COOKIE,
-                    HeaderValue::from_str(&format!("PHPSESSID={}", config.session)).unwrap(),
-                ),
-                (
-                    REFERER,
-                    HeaderValue::from_str("https://www.pixiv.net/").unwrap(),
-                ),
-            ]))
-            .user_agent(&config.user_agent)
-            .build()
-            .unwrap(),
-        config.limit,
-    )
-    .build()
-}
-pub async fn fetch<T: DeserializeOwned>(client: &ArchiveClient, url: &str) -> Result<T> {
-    client
-        .fetch::<PixivResponse<T>>(url)
-        .await
-        .and_then(|r| r.downcast())
-}

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use clap::{Parser, ValueEnum, arg};
+use clap::{Parser, ValueEnum};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use dotenv::dotenv;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};

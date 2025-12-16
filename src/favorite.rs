@@ -1,8 +1,7 @@
-use crate::{Config, artwork::PixivArtworkId, fetch, user::PixivUserId};
+use crate::{Config, api::PixivClient, artwork::PixivArtworkId, user::PixivUserId};
 
 use log::{debug, error, info, warn};
 use plyne::Input;
-use post_archiver_utils::ArchiveClient;
 use serde::Deserialize;
 use tokio::task::JoinSet;
 
@@ -21,7 +20,7 @@ pub struct PixivUserStatus {
 pub async fn reslove_current_user(
     users_pipeline: Input<PixivUserId>,
     artworks_pipeline: Input<PixivArtworkId>,
-    client: &ArchiveClient,
+    client: &PixivClient,
     config: &Config,
 ) {
     if !(config.favorite || config.followed_users) {
@@ -29,9 +28,8 @@ pub async fn reslove_current_user(
         return;
     }
 
-    let user = match fetch::<PixivUserStatusOuter>(
-        client,
-        "https://www.pixiv.net/ajax/settings/self?lang=zh_tw",
+    let user = match client.fetch::<PixivUserStatusOuter>(
+        "https://www.pixiv.net/ajax/settings/self",
     )
     .await
     {
@@ -81,7 +79,7 @@ pub enum PixivFavoriteWorkId {
 
 pub async fn reslove_favorite(
     tx: Input<PixivArtworkId>,
-    client: ArchiveClient,
+    client: PixivClient,
     ty: &'static str,
     user: u64,
 ) {
@@ -98,7 +96,7 @@ pub async fn reslove_favorite(
             "https://www.pixiv.net/ajax/user/{user}/{ty}/bookmarks?tag=&offset={offset}&limit={LIMIT}&rest=show"
         );
 
-        let response = match fetch::<PixivFavorite>(&client, &url).await {
+        let response = match client.fetch::<PixivFavorite>(&url).await {
             Ok(response) => response,
             Err(e) => {
                 error!("[favorite] Failed to fetch {ty}: {e:?}");
@@ -137,7 +135,7 @@ pub struct PixivFollowing {
 pub struct PixivFollowingUser {
     pub user_id: u64,
 }
-pub async fn reslove_following(tx: Input<PixivUserId>, client: ArchiveClient, user: u64) {
+pub async fn reslove_following(tx: Input<PixivUserId>, client: PixivClient, user: u64) {
     let mut page = 0;
     let mut total = 1;
     const LIMIT: usize = 100;
@@ -152,7 +150,7 @@ pub async fn reslove_following(tx: Input<PixivUserId>, client: ArchiveClient, us
             "https://www.pixiv.net/ajax/user/{user}/following?tag=&offset={offset}&limit={LIMIT}&rest=show"
         );
 
-        let response = match fetch::<PixivFollowing>(&client, &url).await {
+        let response = match client.fetch::<PixivFollowing>(&url).await {
             Ok(response) => response,
             Err(e) => {
                 error!("[following] Failed to fetch following user: {e:?}");
