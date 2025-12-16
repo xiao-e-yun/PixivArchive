@@ -380,11 +380,7 @@ mod common {
         struct AnchorHandler(html2md::anchors::AnchorHandler);
         impl TagHandler for AnchorHandler {
             fn handle(&mut self, tag: &html2md::Handle, printer: &mut html2md::StructuredPrinter) {
-                // replace a.href /jump.php to normal link
-                info!(
-                    "[artwork][description] Processing anchor href: {:?}",
-                    tag.data
-                );
+               );
                 if let html2md::NodeData::Element { attrs, .. } = &tag.data
                     && let mut attrs = attrs.borrow_mut()
                     && let Some(href) = attrs
