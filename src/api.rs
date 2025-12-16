@@ -71,6 +71,7 @@ impl PixivClient {
                 .unwrap(),
             config.limit,
         )
+        .pre_sec_limit((config.limit as f32 / 60.0).ceil() as u32)
         .build();
 
         Self { inner }
