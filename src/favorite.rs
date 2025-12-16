@@ -29,7 +29,7 @@ pub async fn reslove_current_user(
     }
 
     let user = match client.fetch::<PixivUserStatusOuter>(
-        "https://www.pixiv.net/ajax/settings/self?lang=zh_tw",
+        "https://www.pixiv.net/ajax/settings/self",
     )
     .await
     {
