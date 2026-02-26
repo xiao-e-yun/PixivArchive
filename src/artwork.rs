@@ -15,7 +15,7 @@ use serde_json::json;
 use serde_repr::Deserialize_repr;
 use tempfile::TempPath;
 use tokio::{
-    fs::{self, File, OpenOptions, create_dir_all},
+    fs::{File, OpenOptions, create_dir_all},
     io, join,
     task::JoinSet,
 };
@@ -290,7 +290,7 @@ pub async fn archive_artworks(mut sync_pipeline: Output<SyncEvent>, manager: &Ma
         };
 
         if let Some(path) = files.first().map(|(dst, _)| dst.parent().unwrap())
-            && let Err(e) = fs::create_dir_all(path).await
+            && let Err(e) = create_dir_all(path).await
         {
             error!(
                 "[artwork] Failed to create directory for {}: {}",
