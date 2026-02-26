@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use api::PixivClient;
 use artwork::{PixivArtwork, PixivArtworkId, archive_artworks, resolve_artworks};
+use clap::Command;
 use config::Config;
 use favorite::reslove_current_user;
 use file::{ArchiveRequest, download_files};
@@ -54,6 +55,19 @@ async fn main() {
             ("Favorite", yes_or_no(config.favorite)),
         ],
     );
+
+    if config.users.is_empty()
+        && config.illusts.is_empty()
+        && config.novels.is_empty()
+        && config.illust_series.is_empty()
+        && config.novel_series.is_empty()
+        && !config.followed_users
+        && !config.favorite
+    {
+        warn!("[main] No targets specified.");
+        warn!("[main] Run with --help for more information.");
+        return;
+    }
 
     if !config.output.exists() {
         warn!("[main] Creating output folder");
