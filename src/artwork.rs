@@ -300,14 +300,12 @@ pub async fn archive_artworks(mut sync_pipeline: Output<SyncEvent>, manager: &Ma
             continue;
         }
 
-        let mut create_dir = true;
         for (path, req) in files {
             let url = req.url().to_string();
-            if let Err(e) = save_file(&mut files_map, &path, &url, create_dir).await {
+            if let Err(e) = save_file(&mut files_map, &path, &url).await {
                 error!("[artwork] Failed to save file {}: {}", path.display(), e);
                 continue 'main;
             };
-            create_dir = false;
         }
 
         if let Err(e) = manager.commit() {
@@ -327,13 +325,7 @@ pub async fn archive_artworks(mut sync_pipeline: Output<SyncEvent>, manager: &Ma
         file_map: &mut HashMap<String, TempPath>,
         path: &PathBuf,
         url: &str,
-        create_dir: bool,
     ) -> Result<()> {
-        if create_dir {
-            let path = path.parent().unwrap();
-            create_dir_all(path).await?;
-        }
-
         let temp = file_map.remove(url).ok_or(io::Error::new(
             io::ErrorKind::NotFound,
             format!("File not found in map: {url}"),
@@ -380,7 +372,6 @@ mod common {
         struct AnchorHandler(html2md::anchors::AnchorHandler);
         impl TagHandler for AnchorHandler {
             fn handle(&mut self, tag: &html2md::Handle, printer: &mut html2md::StructuredPrinter) {
-               );
                 if let html2md::NodeData::Element { attrs, .. } = &tag.data
                     && let mut attrs = attrs.borrow_mut()
                     && let Some(href) = attrs
