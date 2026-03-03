@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use api::PixivClient;
 use artwork::{PixivArtwork, PixivArtworkId, archive_artworks, resolve_artworks};
-use clap::Command;
 use config::Config;
 use favorite::reslove_current_user;
 use file::{ArchiveRequest, download_files};
