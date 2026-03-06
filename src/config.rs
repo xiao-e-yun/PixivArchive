@@ -60,6 +60,8 @@ pub struct Config {
     pub verbose: Verbosity<InfoLevel>,
     #[clap(skip)]
     pub multi: MultiProgress,
+    #[clap(skip)]
+    pub has_ffmpeg: bool,
 }
 
 impl Config {
@@ -86,6 +88,13 @@ impl Config {
                 "Mozilla/{major}.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.{webkit} (KHTML, like Gecko) Chrome/{chrome}.0.0.0 Safari/537.{webkit}"
             );
         }
+
+        config.has_ffmpeg = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
 
         log::set_max_level(level);
         config

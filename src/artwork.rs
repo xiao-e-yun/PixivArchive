@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use futures::try_join;
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
 use plyne::{Input, Output};
 use post_archiver::{
     Comment,
@@ -193,6 +193,8 @@ pub async fn resolve_artworks(
         let sync_pipeline = sync_pipeline.clone();
         let client = client.clone();
         let pb = pb.clone();
+
+        let has_ffmpeg = config.has_ffmpeg;
         tasks.spawn(async move {
             let source = id.url();
 
@@ -203,6 +205,22 @@ pub async fn resolve_artworks(
                     return;
                 }
             };
+
+            if !has_ffmpeg
+                && matches!(
+                    artwork.content,
+                    PixivArtworkContent::Illust {
+                        illust_type: IllustType::Ugoira,
+                        ..
+                    }
+                )
+            {
+                warn!(
+                    "[artwork] Skipping Ugoira {} because ffmpeg is not found",
+                    artwork.id
+                );
+                return;
+            }
 
             let ((contents, thumb), comments) = join!(
                 common::get_contents_and_thumb(&client, &artwork),
@@ -356,7 +374,6 @@ mod common {
     use super::*;
 
     pub fn parse_description(artwork: &PixivArtwork) -> Vec<UnsyncContent<ArchiveRequest>> {
-
         let description = artwork.description.trim();
         if description.is_empty() {
             return vec![];
@@ -469,13 +486,12 @@ mod common {
                     }
                     IllustType::Ugoira => {
                         let extra = thumb.as_ref().unwrap().extra.clone();
-                        let ugoira = match client.fetch::<PixivUgoira>(
-                            &format!(
+                        let ugoira = match client
+                            .fetch::<PixivUgoira>(&format!(
                                 "https://www.pixiv.net/ajax/illust/{}/ugoira_meta",
                                 &artwork.id
-                            ),
-                        )
-                        .await
+                            ))
+                            .await
                         {
                             Ok(ugoira) => ugoira,
                             Err(e) => {
@@ -519,13 +535,12 @@ mod illust {
         client: &PixivClient,
         artwork_id: &str,
     ) -> Result<Vec<UnsyncFileMeta<ArchiveRequest>>> {
-        let pages = client.fetch::<Vec<PixivIllustPages>>(
-            &format!(
+        let pages = client
+            .fetch::<Vec<PixivIllustPages>>(&format!(
                 "https://www.pixiv.net/ajax/illust/{}/pages?lang=ja",
                 &artwork_id
-            ),
-        )
-        .await?;
+            ))
+            .await?;
 
         Ok(pages
             .into_iter()

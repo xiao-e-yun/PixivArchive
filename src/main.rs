@@ -73,6 +73,10 @@ async fn main() {
         std::fs::create_dir_all(&config.output).unwrap();
     }
 
+    if !config.has_ffmpeg {
+        warn!("[main] ffmpeg not found — Ugoira artworks will be skipped");
+    }
+
     info!("[main] Connecting to PostArchiver");
     let manager = PostArchiverManager::open_or_create(&config.output).unwrap();
 
