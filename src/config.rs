@@ -46,8 +46,8 @@ pub struct Config {
     // /// archive user categories
     // #[arg(short, long, num_args = 0..)]
     // pub categories: Vec<ArchiveCategory>,
-    /// Which you path want to save
-    #[arg(default_value = "./archive", env = "OUTPUT")]
+    /// Archive directory to save into
+    #[arg(short, long, default_value = "./archive", env = "OUTPUT")]
     pub output: PathBuf,
     /// Archiving strategy (`full` re-archives existing posts)
     #[arg(long, default_value_t)]
