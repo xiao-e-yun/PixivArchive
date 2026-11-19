@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use futures::try_join;
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use plyne::{Input, Output};
 use post_archiver::{
     Comment,
@@ -183,7 +183,7 @@ pub async fn resolve_artworks(
     while let Some(id) = artworks_pipeline.recv().await {
         pb.inc_length(1);
         if matches!(manager.lock().await.find_post(&id.url()), Ok(Some(_))) {
-            info!("[artwork] Skipping existing post: {}", id.url());
+            debug!("[artwork] Skipping existing post: {}", id.url());
             pb.inc(1);
             continue;
         }
