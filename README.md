@@ -8,23 +8,36 @@ It is importer for pixiv to PostArchiver.
 Usage: pixiv-archive [OPTIONS] <SESSION> [OUTPUT]
 
 Arguments:
-  <SESSION>  Your `PHPSESSID` cookie [env: PHPSESSID=]
+  <SESSION>  Your `PHPSESSID` cookie [env: PHPSESSID]
   [OUTPUT]   Which you path want to save [env: OUTPUT=] [default: ./archive]
 
 Options:
-      --users [<USERS>...]                  archive Id of Users
-      --illusts [<ILLUSTS>...]              archive Id of Illusts
-      --novels [<NOVELS>...]                archive Id of Novels
-      --illust-series [<ILLUST_SERIES>...]  archive Id of Illust Series
-      --novel-series [<NOVEL_SERIES>...]    archive Id of Novel Series
-      --followed-users                      archive followed users
-      --favorite                            archive favorite artworks
-  -o, --overwrite                           Overwrite existing files
-  -u, --user-agent <USER_AGENT>             [default: ]
-  -l, --limit <LIMIT>                       Limit the number of concurrent copys [default: 40]
-  -v, --verbose...                          Increase logging verbosity
-  -q, --quiet...                            Decrease logging verbosity
-  -h, --help                                Print help
+      --users [<USERS>...]
+          archive Id of Users
+      --illusts [<ILLUSTS>...]
+          archive Id of Illusts
+      --novels [<NOVELS>...]
+          archive Id of Novels
+      --illust-series [<ILLUST_SERIES>...]
+          archive Id of Illust Series
+      --novel-series [<NOVEL_SERIES>...]
+          archive Id of Novel Series
+      --followed-users
+          archive followed users
+      --favorite
+          archive favorite artworks
+      --strategy <STRATEGY>
+          Archiving strategy (`full` re-archives existing posts) [default: increment]
+  -u, --user-agent <USER_AGENT>
+          [default: ]
+  -l, --limit <LIMIT>
+          Limit API requests per minute [default: 60]
+  -v, --verbose...
+          Increase logging verbosity
+  -q, --quiet...
+          Decrease logging verbosity
+  -h, --help
+          Print help
 ```
 
 ## Build
