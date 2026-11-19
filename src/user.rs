@@ -1,24 +1,14 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    fmt::Debug,
-};
+use std::collections::HashMap;
 
 use log::{debug, error, info};
 use plyne::{Input, Output};
-use post_archiver::{
-    AuthorId, PlatformId,
-    importer::{UnsyncAlias, UnsyncAuthor},
-    manager::PostArchiverManager,
-};
-use post_archiver_utils::{Error, Result};
 use serde::Deserialize;
-use tokio::sync::MutexGuard;
 use tokio::task::JoinSet;
 
 use crate::{
     api::{NullableBody, PixivClient},
-    artwork::{PixivArtwork, PixivArtworkId},
-    config::{Config, Progress},
+    artwork::PixivArtworkId,
+    config::{IncOnDrop, ProgressSet},
 };
 
 pub type PixivUserId = u64;
@@ -72,30 +62,32 @@ impl PixivUserArtworks {
 pub async fn reslove_users(
     mut users_pipeline: Output<PixivUserId>,
     artworks_pipeline: Input<PixivArtworkId>,
-    config: &Config,
     client: &PixivClient,
+    progress: &ProgressSet,
 ) {
     let mut join_set = JoinSet::new();
-    let pb = Progress::new(config.multi.clone(), "user");
+    let pb = progress.users.clone();
 
     debug!("[user] Waiting for user to resolve");
     while let Some(user) = users_pipeline.recv().await {
-        let pb = pb.clone();
         pb.inc_length(1);
+        let guard = IncOnDrop(pb.clone());
 
         let client = client.clone();
         let tx = artworks_pipeline.clone();
         join_set.spawn(async move {
+            let _guard = guard;
             reslove_user(tx, client, user).await;
             info!("[user] Resolved {user}");
-            pb.inc(1);
         });
     }
 
-    if join_set.is_empty() {
+    let has_users = !join_set.is_empty();
+    join_set.join_all().await;
+    pb.finish();
+    if !has_users {
         return;
     }
-    join_set.join_all().await;
 
     info!("[user] Resolve finished");
 }
@@ -123,39 +115,5 @@ async fn reslove_user(tx: Input<PixivArtworkId>, client: PixivClient, id: PixivU
 
     for artwork in user_artworks.list() {
         tx.send(artwork).ok();
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct UserManager {
-    pub platform: PlatformId,
-    inner: HashMap<String, AuthorId>,
-}
-
-impl UserManager {
-    pub fn new(platform: PlatformId) -> Self {
-        Self {
-            platform,
-            inner: Default::default(),
-        }
-    }
-    pub fn import(
-        &mut self,
-        manager: &MutexGuard<'_, PostArchiverManager>,
-        artwork: &PixivArtwork,
-    ) -> Result<AuthorId> {
-        match self.inner.entry(artwork.user_id.clone()) {
-            Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
-            Entry::Vacant(vacant_entry) => UnsyncAuthor::new(artwork.user_name.clone())
-                .aliases(vec![
-                    UnsyncAlias::new(self.platform, artwork.user_id.clone())
-                        .link(format!("https://www.pixiv.net/users/{}", artwork.user_id)),
-                ])
-                .sync(manager)
-                .inspect(|id| {
-                    vacant_entry.insert(*id);
-                })
-                .map_err(Error::from),
-        }
     }
 }

@@ -1,12 +1,18 @@
+use std::{
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+};
+
+use indicatif::ProgressBar;
 use log::debug;
-use post_archiver_utils::{ArchiveClient, Error, Result};
+use post_archiver_utils::{ArchiveClient, Limit, RequestError, Result, browser_headers};
 use reqwest::{
     Client,
-    header::{self, HeaderMap},
+    header::{self, HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 
-use crate::config::Config;
+use crate::config::{Config, IncOnDrop};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PixivResponse<T> {
@@ -26,7 +32,7 @@ impl<T> PixivResponse<T> {
     pub fn downcast(self) -> Result<T> {
         match self.body {
             NullableBody::Some(body) => Ok(body),
-            NullableBody::None(_) => Err(Error::InvalidResponse(self.message)),
+            NullableBody::None(_) => Err(RequestError::InvalidResponse(self.message).into()),
         }
     }
 }
@@ -41,11 +47,22 @@ pub struct PixivResponseUnwrap<T> {
 impl<T> PixivResponseUnwrap<T> {
     pub fn downcast(self) -> Result<T> {
         if self.error {
-            Err(Error::InvalidResponse(self.message))
+            Err(RequestError::InvalidResponse(self.message).into())
         } else {
             Ok(self.body)
         }
     }
+}
+
+/// Headers shared by API and image requests. Without the Pixiv Referer, i.pximg.net returns 403.
+fn pixiv_headers(config: &Config) -> HeaderMap {
+    let mut headers = browser_headers(&config.user_agent);
+    headers.insert(header::REFERER, HeaderValue::from_static("https://www.pixiv.net/"));
+    headers.insert(
+        header::COOKIE,
+        format!("PHPSESSID={}", config.session).parse().unwrap(),
+    );
+    headers
 }
 
 #[derive(Debug, Clone)]
@@ -55,122 +72,61 @@ pub struct PixivClient {
 
 impl PixivClient {
     pub fn new(config: &Config) -> Self {
-        let mut default_headers = Self::generate_user_headers(&config.user_agent);
-        debug!("Using headers: {default_headers:#?} (without cookies)");
+        let mut headers = pixiv_headers(config);
+        // Origin must not have a trailing slash.
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://www.pixiv.net"));
 
-        default_headers.insert(header::COOKIE, format!("PHPSESSID={}", config.session).parse().unwrap());
-
-        let inner = ArchiveClient::builder(
-            Client::builder()
-                .default_headers(default_headers)
-                .build()
-                .unwrap(),
-            config.limit,
-        )
-        .pre_sec_limit((config.limit as f32 / 60.0).ceil() as u32)
-        .build();
-
-        Self { inner }
-    }
-
-    pub fn generate_user_headers(user_agent: &str) -> HeaderMap {
-        let platform = if user_agent.contains("Windows") || user_agent.contains("Win64") {
-            "\"Windows\""
-        } else if user_agent.contains("Macintosh") || user_agent.contains("Mac OS X") {
-            "\"macOS\""
-        } else if user_agent.contains("Linux") || user_agent.contains("X11") {
-            "\"Linux\""
-        } else {
-            "\"Unknown\""
+        let client = Client::builder().default_headers(headers).build().unwrap();
+        let limit = Limit {
+            per_min: config.limit,
+            ..Default::default()
         };
 
-        let mobile = if user_agent.contains("Mobile") {
-            "?1"
-        } else {
-            "?0"
-        };
-
-        let ua = if user_agent.contains("Edg/") {
-            "Edg"
-        } else if user_agent.contains("Chrome/") {
-            "Chromium"
-        } else if user_agent.contains("Firefox/") {
-            "Firefox"
-        } else if user_agent.contains("Safari/") && !user_agent.contains("Chrome/") {
-            "Safari"
-        } else {
-            "Unknown"
-        };
-
-        let version = user_agent
-            .split_whitespace()
-            .find(|part| part.starts_with(ua))
-            .unwrap_or("Unknown/12")
-            .split('/')
-            .nth(1)
-            .unwrap_or("12")
-            .split('.')
-            .next()
-            .unwrap_or("12");
-
-        let ua = format!("\"Chromium\";v=\"{version}\",")
-            + &match ua {
-                "Edg" => format!("\"Microsoft Edge\";v=\"{version}\""),
-                "Chromium" => format!("\"Google Chrome\";v=\"{version}\""),
-                "Firefox" => format!("\"Firefox\";v=\"{version}\""),
-                "Safari" => format!("\"Safari\";v=\"{version}\""),
-                _ => format!("\"{ua}\";v=\"{version}\""),
-            }
-            + ", \"Not_A Brand\";v=\"99\"";
-
-        HeaderMap::from_iter([
-            (header::ORIGIN, "https://www.pixiv.net/".parse().unwrap()),
-            (header::REFERER, "https://www.pixiv.net/".parse().unwrap()),
-            (header::USER_AGENT, user_agent.parse().unwrap()),
-            (header::DNT, "1".parse().unwrap()),
-            (
-                header::ACCEPT_LANGUAGE,
-                "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7".parse().unwrap(),
-            ),
-            (
-                header::ACCEPT,
-                "application/json, text/plain, */*".parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-ch-ua"),
-                ua.parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-ch-ua-platform"),
-                platform.parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-ch-ua-mobile"),
-                mobile.parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-fetch-dest"),
-                "empty".parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-fetch-mode"),
-                "cors".parse().unwrap(),
-            ),
-            (
-                header::HeaderName::from_static("sec-fetch-site"),
-                "same-site".parse().unwrap(),
-            ),
-        ])
+        Self {
+            inner: ArchiveClient::new(client, limit),
+        }
     }
 
     pub async fn fetch<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        self.inner
-            .fetch::<PixivResponse<T>>(url)
-            .await
-            .and_then(|r| r.downcast())
+        match self.inner.fetch::<PixivResponse<T>>(url).await {
+            Ok(response) => response.downcast(),
+            Err(RequestError::UnexpectedStatus(status, body)) => {
+                debug!("{status} response body: {body}");
+                Err(RequestError::UnexpectedStatus(status, body).into())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Downloads images and ugoira zips from i.pximg.net with its own rate limit,
+/// so file downloads don't eat into the API budget.
+#[derive(Debug, Clone)]
+pub struct PixivDownloader {
+    inner: ArchiveClient,
+    pb: ProgressBar,
+}
+
+impl PixivDownloader {
+    pub fn new(config: &Config, pb: ProgressBar) -> Self {
+        let client = Client::builder()
+            .default_headers(pixiv_headers(config))
+            .build()
+            .unwrap();
+        let limit = Limit {
+            per_min: NonZeroU32::new(90).unwrap(),
+            ..Default::default()
+        };
+
+        Self {
+            inner: ArchiveClient::new(client, limit),
+            pb,
+        }
     }
 
-    pub fn as_inner(&self) -> &ArchiveClient {
-        &self.inner
+    pub async fn download(&self, with_in: &Path, url: &str) -> Result<PathBuf> {
+        self.pb.inc_length(1);
+        let _guard = IncOnDrop(self.pb.clone());
+        Ok(self.inner.download(with_in, url).await?)
     }
 }

@@ -1,21 +1,15 @@
-use std::{sync::Arc};
+use std::{
+    fmt::Write,
+    path::{Path, PathBuf},
+};
 
 use fast_image_resize::{ResizeOptions, Resizer};
-use futures::future::try_join_all;
 use image::{DynamicImage, ImageReader};
 use log::{error, warn};
-use plyne::Output;
-use post_archiver_utils::Result;
+use post_archiver_utils::{RequestError, Result};
 use serde::Deserialize;
-use tempfile::TempPath;
-use tokio::{sync::Semaphore, task::JoinSet};
-use std::fmt::Write;
 
-use crate::{
-    FileEvent,
-    api::PixivClient,
-    config::{Config, Progress},
-};
+use crate::api::PixivDownloader;
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum ArchiveRequest {
@@ -56,72 +50,46 @@ pub struct PixivUgoiraFrame {
     pub file: String,
 }
 
-pub async fn download_files(mut files_pipeline: Output<FileEvent>, config: &Config) {
-    let files_pb = Progress::new(config.multi.clone(), "files");
+/// Download a file into `with_in` and post-process it there (resize / ugoira conversion).
+pub async fn download_file(
+    request: ArchiveRequest,
+    downloader: &PixivDownloader,
+    with_in: &Path,
+) -> Result<PathBuf> {
+    let dst = downloader.download(with_in, request.url()).await?;
 
-    let mut tasks = JoinSet::new();
-    let client = PixivClient::new(config);
-    let semaphore = Arc::new(Semaphore::new(3));
-    while let Some((reqs, tx)) = files_pipeline.recv().await {
-        if reqs.is_empty() {
-            tx.send(Default::default()).unwrap();
-            continue;
-        }
-
-        let semaphore = semaphore.clone();
-        let files_pb = files_pb.clone();
-        let client = client.clone();
-        files_pb.inc_length(reqs.len() as u64);
-        tasks.spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-            match try_join_all(reqs.into_iter().map(async |req| {
-                let url = req.url().to_string();
-                let result = download_file(req, &client).await.map(|dst| (url, dst));
-                files_pb.inc(1);
-                result
-            }))
-            .await
-            {
-                Ok(results) => tx.send(results.into_iter().collect()).unwrap(),
-                Err(e) => error!("Failed to download files: {e}"),
-            }
-        });
-    }
-
-    tasks.join_all().await;
-    files_pb.finish();
-}
-
-async fn download_file(request: ArchiveRequest, client: &PixivClient) -> Result<TempPath> {
-    let dst = client.as_inner().download(request.url()).await?;
-
-    match request {
+    let processed = match request {
         ArchiveRequest::Image(_) => Ok(dst),
-        ArchiveRequest::ImageWithSize {
-            url: _,
-            width,
-            height,
-        } => {
-            // TODO: move resizer to a separate thread
-            resize(dst, width, height)
+        ArchiveRequest::ImageWithSize { width, height, .. } => {
+            // Decoding and resizing is CPU-bound; keep it off the current_thread runtime.
+            tokio::task::spawn_blocking(move || resize(dst, width, height))
+                .await
+                .unwrap_or(Err("Resize task panicked"))
         }
-        ArchiveRequest::Ugoira { url: _, frames } => convert_ugoira(dst, frames).await,
-    }
-    .map_err(|e: &'static str| {
+        ArchiveRequest::Ugoira { frames, .. } => convert_ugoira(dst, frames, with_in).await,
+    };
+
+    processed.map_err(|e| {
         error!("Failed to process file: {e}");
-        post_archiver_utils::Error::InvalidResponse(e.to_string())
+        RequestError::InvalidResponse(e.to_string()).into()
     })
 }
 
 async fn convert_ugoira(
-    zip_path: TempPath,
+    zip_path: PathBuf,
     frames: Vec<PixivUgoiraFrame>,
-) -> std::result::Result<TempPath, &'static str> {
-    let temp_dir = tempfile::tempdir().map_err(|_| "Failed to create temp dir for ugoira")?;
-    let temp_dir_path = temp_dir.path().to_path_buf();
+    with_in: &Path,
+) -> std::result::Result<PathBuf, &'static str> {
+    let frames_dir =
+        tempfile::tempdir_in(with_in).map_err(|_| "Failed to create temp dir for ugoira")?;
+    let frames_path = frames_dir.path().to_path_buf();
+    let concat_path = frames_path.join("concat.txt");
 
-    let concat_path = temp_dir_path.join("concat.txt");
-    let concat_path_cloned = concat_path.clone();
+    let concat = concat_path.clone();
+    let output_name = format!(
+        "ugoira-{}.webm",
+        frames_path.file_name().unwrap().to_string_lossy()
+    );
     tokio::task::spawn_blocking(move || -> std::result::Result<(), &'static str> {
         let zip_file = std::fs::File::open(&zip_path).map_err(|_| "Failed to open ugoira zip")?;
         let mut archive =
@@ -137,42 +105,32 @@ async fn convert_ugoira(
                 .enclosed_name()
                 .ok_or("Unsafe zip entry name")?
                 .to_path_buf();
-            let outpath = temp_dir_path.join(&name);
+            let outpath = frames_path.join(&name);
 
             let mut outfile =
                 std::fs::File::create(&outpath).map_err(|_| "Failed to create frame file")?;
             std::io::copy(&mut entry, &mut outfile).map_err(|_| "Failed to extract frame")?;
         }
+        // The zip is no longer needed once the frames are extracted.
+        let _ = std::fs::remove_file(&zip_path);
 
         let last_frame = frames.last().ok_or("Ugoira has no frames")?;
         let mut content = String::new();
         for frame in &frames {
-            let is_last = frame.file == last_frame.file;
-            let frame_path = temp_dir_path.join(&frame.file);
-            writeln!(content, "file '{}'",frame_path.display()).unwrap();
+            let frame_path = frames_path.join(&frame.file);
+            writeln!(content, "file '{}'", frame_path.display()).unwrap();
             writeln!(content, "duration {}", frame.delay as f64 / 1000.0).unwrap();
-            
-            if is_last { 
-                writeln!(content, "file '{}'",frame_path.display()).unwrap();
-            }
-        };
+        }
+        // ffmpeg's concat demuxer ignores the last duration unless the last frame is repeated.
+        writeln!(content, "file '{}'", frames_path.join(&last_frame.file).display()).unwrap();
 
-        use std::io::Write;
-        let mut file = std::fs::File::create(concat_path_cloned).map_err(|_| "Failed to create concat file")?;
-        file.write(content.as_bytes()).map_err(|_| "Failed to write concat file")?;
-        file.flush().map_err(|_| "Failed to flush concat file")?;
-
-        Ok(())
+        std::fs::write(concat, content).map_err(|_| "Failed to write concat file")
     })
     .await
-    .map_err(|_| "Blocking task panicked")?
-    .map_err(|e| e)?;
+    .map_err(|_| "Blocking task panicked")??;
 
-    let output = tempfile::NamedTempFile::new().map_err(|_| "Failed to create output temp file")?;
-    let output_path = output.path().to_path_buf();
+    let output_path = with_in.join(output_name);
 
-    warn!("{}", concat_path.display());
-    warn!("{}", std::fs::read_to_string(&concat_path).unwrap_or_else(|_| "Failed to read concat file".into()));
     let result = tokio::process::Command::new("ffmpeg")
         .args([
             "-y",
@@ -204,14 +162,19 @@ async fn convert_ugoira(
         return Err("ffmpeg conversion failed");
     }
 
-    Ok(output.into_temp_path())
+    Ok(output_path)
 }
 
-fn resize(path: TempPath, width: u32, height: u32) -> std::result::Result<TempPath, &'static str> {
+fn resize(path: PathBuf, width: u32, height: u32) -> std::result::Result<PathBuf, &'static str> {
     let src_image = ImageReader::open(&path)
         .map_err(|e| {
             warn!("Failed to open image: {e}");
             "Failed to open image"
+        })?
+        .with_guessed_format()
+        .map_err(|e| {
+            warn!("Failed to detect image format: {e}");
+            "Failed to detect image format"
         })?
         .decode()
         .map_err(|e| {
@@ -234,10 +197,14 @@ fn resize(path: TempPath, width: u32, height: u32) -> std::result::Result<TempPa
                 "Failed to resize image"
             })?;
 
-        dst_image.save(&path).map_err(|e| {
-            warn!("Failed to save resized image: {e}");
-            "Failed to save resized image"
-        })?;
+        // Downloaded files have random names without an extension, so name the format explicitly.
+        // JPEG has no alpha channel, so drop it before encoding.
+        DynamicImage::ImageRgb8(dst_image.to_rgb8())
+            .save_with_format(&path, image::ImageFormat::Jpeg)
+            .map_err(|e| {
+                warn!("Failed to save resized image: {e}");
+                "Failed to save resized image"
+            })?;
     }
     Ok(path)
 }

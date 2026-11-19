@@ -35,23 +35,37 @@ pub async fn get_comments(
     is_novel: bool,
     is_root: bool,
 ) -> Vec<Comment> {
-    let ty = if is_novel { "novel" } else { "illust" };
-    let url = match is_root {
-        true => {
-            format!("https://www.pixiv.net/ajax/{ty}s/comments/roots?{ty}_id={id}&limit=4294967295")
-        }
-        false => {
-            format!("https://www.pixiv.net/ajax/{ty}s/comments/replies?comment_id={id}&page=1")
-        }
-    };
+    // Pixiv rejects large page sizes with 400, so page through roots and replies.
+    const ROOT_LIMIT: usize = 50;
 
-    let PixivComments { comments, .. } = client.fetch(&url)
-        .await
-        .inspect_err(|e| {
-            let cty = if is_root { "comments" } else { "replies" };
-            error!("[artwork][comment] Failed fetch {ty} {id} {cty}: {e:?}");
-        })
-        .unwrap_or_default();
+    let ty = if is_novel { "novel" } else { "illust" };
+    let mut comments = vec![];
+    for page in 1.. {
+        let url = match is_root {
+            true => {
+                let offset = (page - 1) * ROOT_LIMIT;
+                format!(
+                    "https://www.pixiv.net/ajax/{ty}s/comments/roots?{ty}_id={id}&offset={offset}&limit={ROOT_LIMIT}"
+                )
+            }
+            false => {
+                format!("https://www.pixiv.net/ajax/{ty}s/comments/replies?comment_id={id}&page={page}")
+            }
+        };
+
+        let response: PixivComments = match client.fetch(&url).await {
+            Ok(response) => response,
+            Err(e) => {
+                let cty = if is_root { "comments" } else { "replies" };
+                error!("[artwork][comment] Failed fetch {ty} {id} {cty}: {e}");
+                break;
+            }
+        };
+        comments.extend(response.comments);
+        if !response.has_next {
+            break;
+        }
+    }
 
     join_all(comments.into_iter().map(async |comment| {
         let replies = if comment.has_replies {

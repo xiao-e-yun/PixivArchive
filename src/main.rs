@@ -1,20 +1,14 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::PixivClient;
-use artwork::{PixivArtwork, PixivArtworkId, archive_artworks, resolve_artworks};
-use config::Config;
+use artwork::{PixivArtworkId, artworks};
+use config::{Config, ProgressSet};
 use favorite::reslove_current_user;
-use file::{ArchiveRequest, download_files};
 use log::{info, warn};
 use plyne::{Input, define_tasks};
-use post_archiver::{
-    Comment,
-    importer::{UnsyncContent, UnsyncFileMeta},
-    manager::PostArchiverManager,
-};
-use post_archiver_utils::display_metadata;
+use post_archiver::{PlatformId, manager::PostArchiverManager};
+use post_archiver_utils::{display_metadata, setup_database};
 use series::{PixivSeriesId, reslove_series};
-use tempfile::TempPath;
 use tokio::sync::Mutex;
 use user::{PixivUserId, reslove_users};
 
@@ -35,25 +29,20 @@ async fn main() {
     fn yes_or_no(value: bool) -> &'static str {
         if value { "Yes" } else { "No" }
     }
-    display_metadata(
-        "Pixiv Archive",
-        &[
-            (
-                "Version",
-                format!("v{}", env!("CARGO_PKG_VERSION")).as_str(),
-            ),
-            ("Overwrite", yes_or_no(config.overwrite)),
-            ("Output", config.output.to_str().unwrap()),
-            ("Limit", &config.limit.to_string()),
-            ("Users", &config.users.len().to_string()),
-            ("Illusts", &config.illusts.len().to_string()),
-            ("Novels", &config.novels.len().to_string()),
-            ("Illust Series", &config.illust_series.len().to_string()),
-            ("Novel Series", &config.novel_series.len().to_string()),
-            ("Followed Users", yes_or_no(config.followed_users)),
-            ("Favorite", yes_or_no(config.favorite)),
-        ],
-    );
+    display_metadata!("Pixiv Archive" {
+        "Version": format!("v{}", env!("CARGO_PKG_VERSION")),
+        "PostArchiver Version": post_archiver::utils::VERSION,
+        "Strategy": config.strategy,
+        "Output": config.output.display(),
+        "Limit": format!("{}/min", config.limit),
+        "Users": config.users.len(),
+        "Illusts": config.illusts.len(),
+        "Novels": config.novels.len(),
+        "Illust Series": config.illust_series.len(),
+        "Novel Series": config.novel_series.len(),
+        "Followed Users": yes_or_no(config.followed_users),
+        "Favorite": yes_or_no(config.favorite),
+    });
 
     if config.users.is_empty()
         && config.illusts.is_empty()
@@ -68,43 +57,40 @@ async fn main() {
         return;
     }
 
-    if !config.output.exists() {
-        warn!("[main] Creating output folder");
-        std::fs::create_dir_all(&config.output).unwrap();
-    }
-
     if !config.has_ffmpeg {
         warn!("[main] ffmpeg not found — Ugoira artworks will be skipped");
     }
 
-    info!("[main] Connecting to PostArchiver");
-    let manager = PostArchiverManager::open_or_create(&config.output).unwrap();
+    let mut manager = match setup_database(&config.output) {
+        Ok(manager) => manager,
+        Err(e) => {
+            log::error!("[main] Failed to open archive: {e}");
+            return;
+        }
+    };
+    // Tags are platform-scoped, so resolve the platform once up front.
+    let platform = manager
+        .importer()
+        .import_platform("pixiv".to_string())
+        .expect("Failed to import platform");
 
     let client = PixivClient::new(&config);
+    let progress = ProgressSet::new(&config.multi);
 
-    PixivSystem::new(Mutex::new(manager), config, client)
-        .execute()
-        .await;
+    PixivSystem::new(
+        Arc::new(Mutex::new(manager)),
+        config,
+        client,
+        platform,
+        progress,
+    )
+    .execute()
+    .await;
 
     info!("[main] Archive completed");
 }
 
-pub type Manager = Mutex<PostArchiverManager>;
-
-pub type FileEvent = (
-    Vec<ArchiveRequest>,
-    tokio::sync::oneshot::Sender<HashMap<String, TempPath>>,
-);
-
-#[derive(Debug)]
-pub struct SyncEvent {
-    source: String,
-    artwork: PixivArtwork,
-    contents: Vec<UnsyncContent<ArchiveRequest>>,
-    thumb: Option<UnsyncFileMeta<ArchiveRequest>>,
-    comments: Vec<Comment>,
-    files: tokio::sync::oneshot::Receiver<HashMap<String, TempPath>>,
-}
+pub type Manager = Arc<Mutex<PostArchiverManager>>;
 
 define_tasks! {
     PixivSystem
@@ -112,22 +98,20 @@ define_tasks! {
         users_pipeline: PixivUserId,
         series_pipeline: PixivSeriesId,
         artworks_pipeline: PixivArtworkId,
-        files_pipeline: FileEvent,
-        sync_pipeline: SyncEvent,
     }
     vars {
         manager: Manager,
         config: Config,
         client: PixivClient,
+        platform: PlatformId,
+        progress: ProgressSet,
     }
     tasks {
         resolve_main,
         reslove_current_user,
         reslove_users,
         reslove_series,
-        resolve_artworks,
-        archive_artworks,
-        download_files,
+        artworks,
     }
 }
 

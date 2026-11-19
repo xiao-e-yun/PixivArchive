@@ -6,7 +6,7 @@ use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
 use crate::{
     api::PixivClient,
     artwork::PixivArtworkId,
-    config::{Config, Progress},
+    config::{IncOnDrop, ProgressSet},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -60,30 +60,32 @@ pub struct PixivNovelSeriesPageWork {
 pub async fn reslove_series(
     mut series_pipeline: Output<PixivSeriesId>,
     artworks_pipeline: Input<PixivArtworkId>,
-    config: &Config,
     client: &PixivClient,
+    progress: &ProgressSet,
 ) {
     let mut join_set = JoinSet::new();
-    let pb = Progress::new(config.multi.clone(), "series");
+    let pb = progress.series.clone();
 
     debug!("[series] Waiting for series to resolve");
     while let Some(series) = series_pipeline.recv().await {
-        let pb = pb.clone();
         pb.inc_length(1);
+        let guard = IncOnDrop(pb.clone());
 
         let client = client.clone();
         let tx = artworks_pipeline.clone();
         join_set.spawn(async move {
+            let _guard = guard;
             reslove_series_single(client, tx, series).await;
             info!("[series] Resolved {}", series.id());
-            pb.inc(1);
         });
     }
 
-    if join_set.is_empty() {
+    let has_series = !join_set.is_empty();
+    join_set.join_all().await;
+    pb.finish();
+    if !has_series {
         return;
     }
-    join_set.join_all().await;
 
     info!("[series] Resolve finished ");
 }

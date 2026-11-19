@@ -2,16 +2,17 @@ use chrono::Utc;
 use clap::{Parser, ValueEnum};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use dotenv::dotenv;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
-use std::{ops::Deref, path::PathBuf};
+use post_archiver_utils::{Strategy, define_progress};
+use std::{num::NonZeroU32, path::PathBuf};
 
 use crate::PixivUserId;
 
-#[derive(Debug, Clone, Parser, Default)]
+#[derive(Debug, Clone, Parser)]
 pub struct Config {
     /// Your `PHPSESSID` cookie
-    #[clap(env = "PHPSESSID")]
+    #[clap(env = "PHPSESSID", hide_env_values = true)]
     pub session: String,
 
     /// archive Id of Users
@@ -48,14 +49,14 @@ pub struct Config {
     /// Which you path want to save
     #[arg(default_value = "./archive", env = "OUTPUT")]
     pub output: PathBuf,
-    /// Overwrite existing files
-    #[arg(short, long)]
-    pub overwrite: bool,
+    /// Archiving strategy (`full` re-archives existing posts)
+    #[arg(long, default_value_t)]
+    pub strategy: Strategy,
     #[arg(short, long, default_value = "")]
     pub user_agent: String,
-    /// Limit the number of concurrent copys
-    #[arg(short, long, default_value = "30")]
-    pub limit: u32,
+    /// Limit API requests per minute
+    #[arg(short, long, default_value = "60")]
+    pub limit: NonZeroU32,
     #[command(flatten)]
     pub verbose: Verbosity<InfoLevel>,
     #[clap(skip)]
@@ -110,31 +111,18 @@ pub enum ArchiveCategory {
     NovelSeries,
 }
 
-#[derive(Debug, Clone)]
-pub struct Progress(ProgressBar);
+define_progress!(ProgressSet [
+    users,
+    series,
+    artworks,
+    files
+]);
 
-impl Progress {
-    pub fn new(multi: MultiProgress, prefix: &'static str) -> Self {
-        Self(
-            multi.add(
-                ProgressBar::new(0)
-                    .with_style(Self::style())
-                    .with_prefix(format!("[{prefix}]")),
-            ),
-        )
-    }
+/// Increments the progress bar by one when dropped, so early returns are still counted.
+pub struct IncOnDrop(pub ProgressBar);
 
-    fn style() -> ProgressStyle {
-        ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar:.cyan/blue} {pos:>3}/{len:3}")
-            .unwrap()
-            .progress_chars("#>-")
-    }
-}
-
-impl Deref for Progress {
-    type Target = ProgressBar;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Drop for IncOnDrop {
+    fn drop(&mut self) {
+        self.0.inc(1);
     }
 }
