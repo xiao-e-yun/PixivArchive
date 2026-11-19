@@ -21,8 +21,8 @@ indicatif = "0.18.0"
 indicatif-log-bridge = "0.2.3"
 log = "0.4.27"
 mime_guess = "2.0.5"
-post-archiver = { path = "../../workspace/post-archiver", features = ["importer"] }
-post-archiver-utils = { path = "../../workspace/post-archiver-utils" }
+post-archiver = { version = "0.6", features = ["importer"] }
+post-archiver-utils = "0.3"
 plyne = "0.1.2"
 reqwest = { version = "0.12.22", features = ["native-tls-alpn"] }
 serde = "1.0.219"
